@@ -1,0 +1,47 @@
+# Builds the Atari 5200 core with Quartus (in Docker) and uploads an
+# SD card ready zip as a workflow artifact.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Free disk space for the Quartus image
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Compile with Quartus
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/build" -w /build/src/fpga \
+            raetro/quartus:21.1 quartus_sh --flow compile ap_core
+
+      - name: Resource and timing summary
+        if: always()
+        run: |
+          cat src/fpga/output_files/ap_core.fit.summary || true
+          grep -A 30 "Slow 1100mV 85C Model Setup Summary" src/fpga/output_files/ap_core.sta.rpt || true
+
+      - name: Keep the Quartus reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quartus-reports-${{ github.run_number }}
+          path: src/fpga/output_files/*.rpt
+
+      - name: Package for the SD card
+        run: python3 tools/package.py
+
+      - name: Upload SD card files
+        uses: actions/upload-artifact@v4
+        with:
+          name: Atari5200-Pocket-build-${{ github.run_number }}
+          path: release/sd/

@@ -1,0 +1,50 @@
+{
+  "interact": {
+    "magic": "APF_VER_1",
+    "variables": [
+      {
+        "name": "Reset",
+        "id": 1,
+        "type": "action",
+        "enabled": true,
+        "address": "0x40000000",
+        "value": 1
+      },
+      {
+        "name": "16K Cart Layout",
+        "id": 10,
+        "type": "list",
+        "enabled": true,
+        "persist": false,
+        "address": "0x40000004",
+        "defaultval": 0,
+        "options": [
+          { "value": 0, "name": "Auto" },
+          { "value": 1, "name": "One Chip" },
+          { "value": 2, "name": "Two Chip" }
+        ]
+      },
+      {
+        "name": "Swap Controllers 1+2",
+        "id": 11,
+        "type": "check",
+        "enabled": true,
+        "persist": true,
+        "address": "0x40000008",
+        "defaultval": 0,
+        "value": 1
+      },
+      {
+        "name": "Twin Stick (Robotron)",
+        "id": 12,
+        "type": "check",
+        "enabled": true,
+        "persist": false,
+        "address": "0x4000000C",
+        "defaultval": 0,
+        "value": 1
+      }
+    ],
+    "messages": []
+  }
+}

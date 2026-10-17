@@ -1,0 +1,26 @@
+# Quartus outputs
+src/fpga/db/
+src/fpga/incremental_db/
+src/fpga/output_files/
+src/fpga/*.qws
+src/fpga/*.rpt
+src/fpga/*.summary
+src/fpga/*.smsg
+src/fpga/*.done
+src/fpga/*.jdi
+src/fpga/*.pin
+src/fpga/*.sld
+src/fpga/greybox_tmp/
+release/
+
+# Simulation outputs and ROMs (never commit BIOS or game images)
+sim/roms/
+sim/out/
+sim/work/
+sim/obj_dir/
+sim/*_synth.v
+sim/synth.log
+*.rom
+*.a52
+*.car
+__pycache__/

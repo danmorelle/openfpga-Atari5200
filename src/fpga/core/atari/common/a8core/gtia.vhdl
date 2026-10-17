@@ -1,0 +1,2157 @@
+---------------------------------------------------------------------------
+-- (c) 2013 mark watson
+-- I am happy for anyone to use this for non-commercial use.
+-- If my vhdl files are used commercially or otherwise sold,
+-- please contact me for explicit permission at scrameta (gmail).
+-- This applies for source and binary form and derived works.
+--
+-- This current version includes modifications for the VBXE which take
+-- this module a bit away from the original design, mostly in the colour
+-- register setting process.
+---------------------------------------------------------------------------
+
+LIBRARY ieee;
+USE ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+ENTITY gtia IS
+PORT 
+( 
+	CLK : IN STD_LOGIC;
+	ADDR : IN STD_LOGIC_VECTOR(4 DOWNTO 0);
+	CPU_DATA_IN : IN STD_LOGIC_VECTOR(7 DOWNTO 0);
+	WR_EN : IN STD_LOGIC;
+	
+	MEMORY_DATA_IN : IN STD_LOGIC_VECTOR(7 DOWNTO 0);
+	ANTIC_FETCH : in std_logic;
+	
+	CPU_ENABLE_ORIGINAL : in std_logic; -- on cycle data is ready
+	ENABLE_179 : in std_logic := '0'; -- one cycle before new cycle, snap registers
+	
+	RESET_N : IN STD_LOGIC;
+	
+	PAL : IN STD_LOGIC;
+	CLIP_SIDES : IN STD_LOGIC;
+	GTIA_XCOLOR : in std_logic := '0';
+	
+	-- ANTIC interface
+	COLOUR_CLOCK : in std_logic;
+	COLOUR_CLOCK_HIGHRES : in std_logic;
+	AN : IN STD_LOGIC_VECTOR(2 downto 0);
+	
+	-- VBXE, all optional to be connected
+	VBXE_XCOLOR : in std_logic := '0';
+	COLOUR_CLOCK_VBXE : in std_logic := '0';
+	GTIA_HIGHRES_OUT : out std_logic;
+	GTIA_HIGHRES_IN : in std_logic := '0';
+	GTIA_ACTIVE_HR_OUT : out std_logic_vector(1 downto 0);
+	GTIA_ACTIVE_HR_IN : in std_logic_vector(1 downto 0) := "00";
+	GTIA_PRIOR : out std_logic_vector(7 downto 0);
+	GTIA_PRIOR_RAW : out std_logic_vector(9 downto 0);
+	GTIA_PRIOR_IN : in std_logic_vector(9 downto 0) := (others => '0');
+	GTIA_VSYNC : out std_logic;
+	GTIA_HPOS : out std_logic_vector(7 downto 0);
+	GTIA_PF0_OUT : out std_logic_vector(7 downto 0);
+	GTIA_PF1_OUT : out std_logic_vector(7 downto 0);
+	GTIA_PF2_OUT : out std_logic_vector(7 downto 0);
+	GTIA_PF3_OUT : out std_logic_vector(7 downto 0);
+	GTIA_PF0_IN : in std_logic_vector(7 downto 0) := (others => '0');
+	GTIA_PF1_IN : in std_logic_vector(7 downto 0) := (others => '0');
+	GTIA_PF2_IN : in std_logic_vector(7 downto 0) := (others => '0');
+	VBXE_PF_PALETTE : in std_logic_vector(1 downto 0) := "00";
+	VBXE_OV_PALETTE : in std_logic_vector(1 downto 0) := "00";
+	VBXE_OV_PIXEL : in std_logic_vector(7 downto 0) := (others => '0');
+	VBXE_OV_PIXEL_ACTIVE : in std_logic := '0';
+	ANTIC_DMA_ENABLED : in std_logic := '0';
+
+	-- keyboard interface
+	CONSOL_IN : IN STD_LOGIC_VECTOR(3 downto 0);
+	CONSOL_OUT : out STD_LOGIC_VECTOR(3 downto 0);
+	
+	-- keyboard interface
+	TRIG : IN STD_LOGIC_VECTOR;
+	
+	-- CPU interface
+	DATA_OUT : OUT STD_LOGIC_VECTOR(7 DOWNTO 0);
+	
+	-- TO scandoubler...
+	COLOUR_out : out std_logic_vector(7 downto 0);
+	PALETTE_out : out std_logic_vector(1 downto 0);
+
+	VSYNC : out std_logic;
+	HSYNC : out std_logic;
+	CSYNC : out std_logic;
+	BLANK : out std_logic;
+	BURST : out std_logic;
+	START_OF_FIELD : out std_logic;
+	ODD_LINE : out std_logic;
+
+	-- For the interlace hack
+	interlace_field : out std_logic;
+	interlace : out std_logic;
+	interlace_enable : in std_logic := '0';
+
+	-- special for MISTER!
+	HBLANK : out std_logic;
+	VBLANK : out std_logic
+);
+END gtia;
+
+ARCHITECTURE vhdl OF gtia IS
+	COMPONENT complete_address_decoder IS
+	generic (width : natural := 1);
+	PORT 
+	( 
+		addr_in : in std_logic_vector(width-1 downto 0);			
+		addr_decoded : out std_logic_vector((2**width)-1 downto 0)
+	);
+	END component;
+	
+	component simple_counter IS
+	generic
+	(
+		COUNT_WIDTH : natural := 1
+	);
+	PORT 
+	( 
+		CLK : IN STD_LOGIC;
+		RESET_n : IN STD_LOGIC;
+		increment : in std_logic;
+		load : IN STD_LOGIC;
+		load_value : in std_logic_vector(COUNT_WIDTH-1 downto 0);
+
+		current_value : out std_logic_vector(COUNT_WIDTH-1 downto 0)
+	);
+	END component;
+	
+	component delay_line IS
+	generic(COUNT : natural := 1);
+	PORT 
+	( 
+		CLK : IN STD_LOGIC;
+		SYNC_RESET : IN STD_LOGIC;
+		DATA_IN : IN STD_LOGIC;
+		ENABLE : IN STD_LOGIC; -- i.e. shift on this clock
+		RESET_N : IN STD_LOGIC;
+		
+		DATA_OUT : OUT STD_LOGIC
+	);
+	END component;	
+	
+	component wide_delay_line IS
+	generic(COUNT : natural := 1; WIDTH : natural :=1);
+	PORT 
+	( 
+		CLK : IN STD_LOGIC;
+		SYNC_RESET : IN STD_LOGIC;
+		DATA_IN : IN STD_LOGIC_VECTOR(WIDTH-1 downto 0);
+		ENABLE : IN STD_LOGIC; -- i.e. shift on this clock
+		RESET_N : IN STD_LOGIC;
+		
+		DATA_OUT : OUT STD_LOGIC_VECTOR(WIDTH-1 downto 0)
+	);
+	END component;
+	
+	component gtia_player IS
+	PORT 
+	( 
+		CLK : IN STD_LOGIC;
+		RESET_N : in std_logic;
+		
+		COLOUR_ENABLE : IN STD_LOGIC;
+		LIVE_POSITION : in std_logic_vector(7 downto 0);   -- counter ticks as display is drawn
+		PLAYER_POSITION : in std_logic_vector(7 downto 0); -- requested position
+		SIZE : in std_logic_vector(1 downto 0);
+		bitmap : in std_logic_vector(7 downto 0);
+		
+		output : out std_logic
+	);
+	END component;
+	
+	component gtia_priority_store IS
+	PORT 
+	( 
+		CLK : in std_logic;
+		colour_enable : in std_logic;
+
+		PRIOR : in std_logic_vector(7 downto 0);
+		P0 : in std_logic;
+		P1 : in std_logic;
+		P2	: in std_logic;
+		P3 : in std_logic;
+		PF0 : in std_logic;
+		PF1 : in std_logic;
+		PF2 : in std_logic;
+		PF3 : in std_logic;
+		BK : in std_logic;
+		
+		PRIOR_OUT : out std_logic_vector(4 downto 0);
+		P0_OUT : out std_logic;
+		P1_OUT : out std_logic;
+		P2_OUT : out std_logic;
+		P3_OUT : out std_logic;
+		PF0_OUT : out std_logic;
+		PF1_OUT : out std_logic;
+		PF2_OUT : out std_logic;
+		PF3_OUT : out std_logic;
+		BK_OUT : out std_logic
+	);
+	END component;	
+
+	component gtia_priority IS
+	PORT 
+	( 
+		PRIOR : in std_logic_vector(4 downto 0);
+		P0 : in std_logic;
+		P1 : in std_logic;
+		P2	: in std_logic;
+		P3 : in std_logic;
+		PF0 : in std_logic;
+		PF1 : in std_logic;
+		PF2 : in std_logic;
+		PF3 : in std_logic;
+		BK : in std_logic;
+		
+		P0_OUT : out std_logic;
+		P1_OUT : out std_logic;
+		P2_OUT : out std_logic;
+		P3_OUT : out std_logic;
+		PF0_OUT : out std_logic;
+		PF1_OUT : out std_logic;
+		PF2_OUT : out std_logic;
+		PF3_OUT : out std_logic;
+		BK_OUT : out std_logic
+	);
+	END component;	
+
+	function repeat(N: natural; B: std_logic) return std_logic_vector is
+        variable result: std_logic_vector(1 to N);
+    begin
+        for i in 1 to N loop
+    	    result(i) := B;
+        end loop;
+        return result;
+    end;
+	
+	signal addr_decoded : std_logic_vector(31 downto 0);
+	
+	signal hposp0_raw_next : std_logic_vector(7 downto 0);
+	signal hposp0_raw_reg : std_logic_vector(7 downto 0);
+	signal hposp1_raw_next : std_logic_vector(7 downto 0);
+	signal hposp1_raw_reg : std_logic_vector(7 downto 0);
+	signal hposp2_raw_next : std_logic_vector(7 downto 0);
+	signal hposp2_raw_reg : std_logic_vector(7 downto 0);
+	signal hposp3_raw_next : std_logic_vector(7 downto 0);
+	signal hposp3_raw_reg : std_logic_vector(7 downto 0);
+	signal hposp0_delayed_reg : std_logic_vector(7 downto 0);
+	signal hposp1_delayed_reg : std_logic_vector(7 downto 0);
+	signal hposp2_delayed_reg : std_logic_vector(7 downto 0);
+	signal hposp3_delayed_reg : std_logic_vector(7 downto 0);
+	signal hposp0_snap_next : std_logic_vector(7 downto 0);
+	signal hposp1_snap_next : std_logic_vector(7 downto 0);
+	signal hposp2_snap_next : std_logic_vector(7 downto 0);
+	signal hposp3_snap_next : std_logic_vector(7 downto 0);
+	signal hposp0_snap_reg : std_logic_vector(7 downto 0);
+	signal hposp1_snap_reg : std_logic_vector(7 downto 0);
+	signal hposp2_snap_reg : std_logic_vector(7 downto 0);
+	signal hposp3_snap_reg : std_logic_vector(7 downto 0);
+	
+	signal hposm0_raw_next : std_logic_vector(7 downto 0);
+	signal hposm0_raw_reg : std_logic_vector(7 downto 0);
+	signal hposm1_raw_next : std_logic_vector(7 downto 0);
+	signal hposm1_raw_reg : std_logic_vector(7 downto 0);
+	signal hposm2_raw_next : std_logic_vector(7 downto 0);
+	signal hposm2_raw_reg : std_logic_vector(7 downto 0);
+	signal hposm3_raw_next : std_logic_vector(7 downto 0);
+	signal hposm3_raw_reg : std_logic_vector(7 downto 0);
+	signal hposm0_delayed_reg : std_logic_vector(7 downto 0);
+	signal hposm1_delayed_reg : std_logic_vector(7 downto 0);
+	signal hposm2_delayed_reg : std_logic_vector(7 downto 0);
+	signal hposm3_delayed_reg : std_logic_vector(7 downto 0);	
+	signal hposm0_snap_next : std_logic_vector(7 downto 0);
+	signal hposm1_snap_next : std_logic_vector(7 downto 0);
+	signal hposm2_snap_next : std_logic_vector(7 downto 0);
+	signal hposm3_snap_next : std_logic_vector(7 downto 0);	
+	signal hposm0_snap_reg : std_logic_vector(7 downto 0);
+	signal hposm1_snap_reg : std_logic_vector(7 downto 0);
+	signal hposm2_snap_reg : std_logic_vector(7 downto 0);
+	signal hposm3_snap_reg : std_logic_vector(7 downto 0);	
+	
+	signal sizep0_raw_next : std_logic_vector(1 downto 0);
+	signal sizep0_raw_reg : std_logic_vector(1 downto 0);
+	signal sizep1_raw_next : std_logic_vector(1 downto 0);
+	signal sizep1_raw_reg : std_logic_vector(1 downto 0);
+	signal sizep2_raw_next : std_logic_vector(1 downto 0);
+	signal sizep2_raw_reg : std_logic_vector(1 downto 0);
+	signal sizep3_raw_next : std_logic_vector(1 downto 0);
+	signal sizep3_raw_reg : std_logic_vector(1 downto 0);
+
+	signal sizem_raw_next : std_logic_vector(7 downto 0);
+	signal sizem_raw_reg : std_logic_vector(7 downto 0);
+
+	signal sizep0_delayed_reg : std_logic_vector(1 downto 0);
+	signal sizep1_delayed_reg : std_logic_vector(1 downto 0);
+	signal sizep2_delayed_reg : std_logic_vector(1 downto 0);
+	signal sizep3_delayed_reg : std_logic_vector(1 downto 0);
+	signal sizem_delayed_reg : std_logic_vector(7 downto 0);
+	signal sizep0_snap_next : std_logic_vector(1 downto 0);
+	signal sizep1_snap_next : std_logic_vector(1 downto 0);
+	signal sizep2_snap_next : std_logic_vector(1 downto 0);
+	signal sizep3_snap_next : std_logic_vector(1 downto 0);
+	signal sizem_snap_next: std_logic_vector(7 downto 0);
+	signal sizep0_snap_reg : std_logic_vector(1 downto 0);
+	signal sizep1_snap_reg : std_logic_vector(1 downto 0);
+	signal sizep2_snap_reg : std_logic_vector(1 downto 0);
+	signal sizep3_snap_reg : std_logic_vector(1 downto 0);
+	signal sizem_snap_reg : std_logic_vector(7 downto 0);
+	
+	signal grafp0_next : std_logic_vector(7 downto 0);
+	signal grafp0_reg : std_logic_vector(7 downto 0);
+	signal grafp1_next : std_logic_vector(7 downto 0);
+	signal grafp1_reg : std_logic_vector(7 downto 0);
+	signal grafp2_next : std_logic_vector(7 downto 0);
+	signal grafp2_reg : std_logic_vector(7 downto 0);
+	signal grafp3_next : std_logic_vector(7 downto 0);
+	signal grafp3_reg : std_logic_vector(7 downto 0);
+	
+	signal grafm_next : std_logic_vector(7 downto 0);
+	signal grafm_reg : std_logic_vector(7 downto 0);
+
+	signal grafm_reg10_extended : std_logic_vector(7 downto 0);
+	signal grafm_reg32_extended : std_logic_vector(7 downto 0);
+	signal grafm_reg54_extended : std_logic_vector(7 downto 0);
+	signal grafm_reg76_extended : std_logic_vector(7 downto 0);
+
+	signal colpm0_raw_next : std_logic_vector(7 downto 0);
+	signal colpm0_raw_reg : std_logic_vector(7 downto 0);
+	signal colpm1_raw_next : std_logic_vector(7 downto 0);
+	signal colpm1_raw_reg : std_logic_vector(7 downto 0);
+	signal colpm2_raw_next : std_logic_vector(7 downto 0);
+	signal colpm2_raw_reg : std_logic_vector(7 downto 0);
+	signal colpm3_raw_next : std_logic_vector(7 downto 0);
+	signal colpm3_raw_reg : std_logic_vector(7 downto 0);
+	signal colpm0_snap_next : std_logic_vector(7 downto 0);
+	signal colpm1_snap_next : std_logic_vector(7 downto 0);
+	signal colpm2_snap_next : std_logic_vector(7 downto 0);
+	signal colpm3_snap_next : std_logic_vector(7 downto 0);
+	signal colpm0_snap_reg : std_logic_vector(7 downto 0);
+	signal colpm1_snap_reg : std_logic_vector(7 downto 0);
+	signal colpm2_snap_reg : std_logic_vector(7 downto 0);
+	signal colpm3_snap_reg : std_logic_vector(7 downto 0);
+
+	signal colpf0_raw_next : std_logic_vector(7 downto 0);
+	signal colpf0_raw_reg : std_logic_vector(7 downto 0);
+	signal colpf1_raw_next : std_logic_vector(7 downto 0);
+	signal colpf1_raw_reg : std_logic_vector(7 downto 0);
+	signal colpf2_raw_next : std_logic_vector(7 downto 0);
+	signal colpf2_raw_reg : std_logic_vector(7 downto 0);
+	signal colpf3_raw_next : std_logic_vector(7 downto 0);
+	signal colpf3_raw_reg : std_logic_vector(7 downto 0);
+	signal colpf0_snap_next : std_logic_vector(7 downto 0);
+	signal colpf1_snap_next : std_logic_vector(7 downto 0);
+	signal colpf2_snap_next : std_logic_vector(7 downto 0);
+	signal colpf3_snap_next : std_logic_vector(7 downto 0);
+	signal colpf0_snap_reg : std_logic_vector(7 downto 0);
+	signal colpf1_snap_reg : std_logic_vector(7 downto 0);
+	signal colpf2_snap_reg : std_logic_vector(7 downto 0);
+	signal colpf3_snap_reg : std_logic_vector(7 downto 0);
+
+	signal colbk_raw_next : std_logic_vector(7 downto 0);
+	signal colbk_raw_reg : std_logic_vector(7 downto 0);
+	signal colbk_snap_next : std_logic_vector(7 downto 0);
+	signal colbk_snap_reg : std_logic_vector(7 downto 0);
+	
+	signal prior_raw_next : std_logic_vector(7 downto 0);
+	signal prior_raw_reg : std_logic_vector(7 downto 0);
+	signal prior_delayed_reg : std_logic_vector(7 downto 0);
+	signal prior_delayed2_reg : std_logic_vector(7 downto 6);
+	signal prior_snap_next : std_logic_vector(7 downto 0);	
+	signal prior_snap_reg : std_logic_vector(7 downto 0);	
+	signal prior6_prev : std_logic;	
+
+	signal vdelay_next : std_logic_vector(7 downto 0);
+	signal vdelay_reg : std_logic_vector(7 downto 0);
+
+	signal gractl_next : std_logic_vector(4 downto 0);
+	signal gractl_reg : std_logic_vector(4 downto 0);
+	
+	signal consol_output_next : std_logic_vector(3 downto 0);
+	signal consol_output_reg : std_logic_vector(3 downto 0);
+	
+	signal trig_next : std_logic_vector(3 downto 0);
+	signal trig_reg : std_logic_vector(3 downto 0);
+	
+	-- collisions
+	signal hitclr_write : std_logic;
+	
+	signal m0pf_next : std_logic_vector(3 downto 0);
+	signal m0pf_reg : std_logic_vector(3 downto 0);
+	signal m1pf_next : std_logic_vector(3 downto 0);
+	signal m1pf_reg : std_logic_vector(3 downto 0);
+	signal m2pf_next : std_logic_vector(3 downto 0);
+	signal m2pf_reg : std_logic_vector(3 downto 0);
+	signal m3pf_next : std_logic_vector(3 downto 0);
+	signal m3pf_reg : std_logic_vector(3 downto 0);
+
+	signal m0pl_next : std_logic_vector(3 downto 0);
+	signal m0pl_reg : std_logic_vector(3 downto 0);
+	signal m1pl_next : std_logic_vector(3 downto 0);
+	signal m1pl_reg : std_logic_vector(3 downto 0);
+	signal m2pl_next : std_logic_vector(3 downto 0);
+	signal m2pl_reg : std_logic_vector(3 downto 0);
+	signal m3pl_next : std_logic_vector(3 downto 0);
+	signal m3pl_reg : std_logic_vector(3 downto 0);
+	
+	signal p0pf_next : std_logic_vector(3 downto 0);
+	signal p0pf_reg : std_logic_vector(3 downto 0);
+	signal p1pf_next : std_logic_vector(3 downto 0);
+	signal p1pf_reg : std_logic_vector(3 downto 0);
+	signal p2pf_next : std_logic_vector(3 downto 0);
+	signal p2pf_reg : std_logic_vector(3 downto 0);
+	signal p3pf_next : std_logic_vector(3 downto 0);
+	signal p3pf_reg : std_logic_vector(3 downto 0);	
+	
+	signal p0pl_next : std_logic_vector(3 downto 0);
+	signal p0pl_reg : std_logic_vector(3 downto 0);
+	signal p1pl_next : std_logic_vector(3 downto 0);
+	signal p1pl_reg : std_logic_vector(3 downto 0);
+	signal p2pl_next : std_logic_vector(3 downto 0);
+	signal p2pl_reg : std_logic_vector(3 downto 0);
+	signal p3pl_next : std_logic_vector(3 downto 0);
+	signal p3pl_reg : std_logic_vector(3 downto 0);		
+	
+	-- priority
+	signal set_p0 : std_logic;
+	signal set_p1 : std_logic;
+	signal set_p2 : std_logic;
+	signal set_p3 : std_logic;
+	signal set_pf0 : std_logic;
+	signal set_pf1 : std_logic;
+	signal set_pf2 : std_logic;
+	signal set_pf3 : std_logic;
+	signal set_bk : std_logic;	
+
+	-- ouput/sync
+	signal COLOUR_NEXT : std_logic_vector(7 downto 0);
+	signal COLOUR_REG : std_logic_vector(7 downto 0);
+	signal COLOUR_SAVED_NEXT : std_logic_vector(7 downto 0);
+	signal COLOUR_SAVED_REG : std_logic_vector(7 downto 0);
+	signal PALETTE_NEXT : std_logic_vector(1 downto 0);
+	signal PALETTE_REG : std_logic_vector(1 downto 0);
+	signal OV_PALETTE_NEXT : std_logic_vector(1 downto 0);
+	signal OV_PALETTE_REG : std_logic_vector(1 downto 0);
+	signal PF_PALETTE_NEXT : std_logic_vector(1 downto 0);
+	signal PF_PALETTE_REG : std_logic_vector(1 downto 0);
+	
+	signal vsync_next : std_logic;
+	signal vsync_reg : std_logic;
+	signal vsync_half_next : std_logic;
+	signal vsync_half_reg : std_logic;
+
+	signal hsync_next : std_logic;
+	signal hsync_reg : std_logic;
+	
+	signal csync_next : std_logic;
+	signal csync_reg : std_logic;	
+	
+	signal hsync_start : std_logic;
+	signal hsync_end : std_logic;
+
+	signal csync_start : std_logic;
+	signal csync_end : std_logic;	
+	
+	signal burst_next : std_logic;
+	signal burst_reg : std_logic;
+	
+	signal burst_start : std_logic;
+	signal burst_end : std_logic;
+	
+	signal hblank_next : std_logic;
+	signal hblank_reg : std_logic;
+	
+	-- visible region (no collision detection outside this)
+	signal visible_live : std_logic;
+	signal invisible_live_reg : std_logic;
+	signal invisible_live_next : std_logic;
+	signal invisible_live_adj : std_logic;
+
+	signal invisible_clip : std_logic;	
+	signal invisible_clip_adj : std_logic;
+
+	-- antic input decode
+	signal an_prev3_next : std_logic_vector(2 downto 0);
+	signal an_prev3_reg : std_logic_vector(2 downto 0);	
+	signal an_prev2_next : std_logic_vector(2 downto 0);
+	signal an_prev2_reg : std_logic_vector(2 downto 0);	
+	signal an_prev_next : std_logic_vector(2 downto 0);
+	signal an_prev_reg : std_logic_vector(2 downto 0);
+	
+	signal active_bk_modify_next : std_logic_vector(7 downto 0);
+	signal active_bk_modify_reg : std_logic_vector(7 downto 0);
+	signal active_bk_valid_next : std_logic_vector(7 downto 0);
+	signal active_bk_valid_reg : std_logic_vector(7 downto 0);
+	signal active_bk_live : std_logic;
+	signal active_pf0_live : std_logic;
+	signal active_pf1_live : std_logic;
+	signal active_pf2_live : std_logic;
+	signal active_pf2_collision_live : std_logic;
+	signal active_pf3_live : std_logic;
+	signal active_pf3_collision_live : std_logic;
+	signal active_pm0_live : std_logic;
+	signal active_pm1_live : std_logic;
+	signal active_pm2_live : std_logic;
+	signal active_pm3_live : std_logic;
+	
+	signal active_p0_live : std_logic;
+	signal active_p1_live : std_logic;
+	signal active_p2_live : std_logic;
+	signal active_p3_live : std_logic;
+	signal active_m0_live : std_logic;
+	signal active_m1_live : std_logic;
+	signal active_m2_live : std_logic;
+	signal active_m3_live : std_logic;
+	
+	signal active_hr_next : std_logic_vector(1 downto 0);
+	signal active_hr_reg : std_logic_vector(1 downto 0);
+	signal highres_next : std_logic;
+	signal highres_reg : std_logic;
+	
+	signal set_prior_adj : std_logic_vector(4 downto 0);
+	signal set_bk_adj : std_logic;
+	signal set_pf0_adj : std_logic;
+	signal set_pf1_adj : std_logic;
+	signal set_pf2_adj : std_logic;
+	signal set_pf3_adj : std_logic;
+	signal set_p0_adj : std_logic;
+	signal set_p1_adj : std_logic;
+	signal set_p2_adj : std_logic;
+	signal set_p3_adj : std_logic;
+
+	signal set_prior_pre : std_logic_vector(4 downto 0);
+	signal set_p0_pre : std_logic;
+	signal set_p1_pre : std_logic;
+	signal set_p2_pre : std_logic;
+	signal set_p3_pre : std_logic;
+	signal set_pf0_pre : std_logic;
+	signal set_pf1_pre : std_logic;
+	signal set_pf2_pre : std_logic;
+	signal set_pf3_pre : std_logic;
+	signal set_bk_pre : std_logic;	
+
+	signal set_bk_gtia : std_logic;
+	signal set_pf0_gtia : std_logic;
+	signal set_pf1_gtia : std_logic;
+	signal set_pf2_gtia : std_logic;
+	signal set_pf3_gtia : std_logic;
+	signal set_p0_gtia : std_logic;
+	signal set_p1_gtia : std_logic;
+	signal set_p2_gtia : std_logic;
+	signal set_p3_gtia : std_logic;
+
+	signal set_bk_vbxe : std_logic;
+	signal set_pf0_vbxe : std_logic;
+	signal set_pf1_vbxe : std_logic;
+	signal set_pf2_vbxe : std_logic;
+	signal set_pf3_vbxe : std_logic;
+	signal set_p0_vbxe : std_logic;
+	signal set_p1_vbxe : std_logic;
+	signal set_p2_vbxe : std_logic;
+	signal set_p3_vbxe : std_logic;
+
+	signal colpf0_adj : std_logic_vector(7 downto 0);
+	signal colpf1_adj : std_logic_vector(7 downto 0);
+	signal colpf2_adj : std_logic_vector(7 downto 0);
+	signal colpf3_adj : std_logic_vector(7 downto 0);
+	signal colpm0_adj : std_logic_vector(7 downto 0);
+	signal colpm1_adj : std_logic_vector(7 downto 0);
+	signal colpm2_adj : std_logic_vector(7 downto 0);
+	signal colpm3_adj : std_logic_vector(7 downto 0);
+	signal colbk_adj : std_logic_vector(7 downto 0);
+
+	signal highres_adj : std_logic;
+	signal active_hr_adj : std_logic_vector(1 downto 0);
+
+	signal gtia_prior_reg : std_logic_vector(7 downto 0);
+	signal gtia_prior_next : std_logic_vector(7 downto 0);
+	signal gtia_prior_adj : std_logic_vector(9 downto 0);
+
+	-- horizontal position counter
+	signal hpos_reg : std_logic_vector(7 downto 0);
+	signal reset_counter : std_logic;
+	signal counter_load_value : std_logic_vector(7 downto 0);
+	
+	-- pmg dma
+	signal grafm_dma_load : std_logic;
+	signal grafm_dma_next : std_logic_vector(7 downto 0);
+	signal grafp0_dma_load : std_logic;
+	signal grafp0_dma_next : std_logic_vector(7 downto 0);
+	signal grafp1_dma_load : std_logic;
+	signal grafp1_dma_next : std_logic_vector(7 downto 0);
+	signal grafp2_dma_load : std_logic;
+	signal grafp2_dma_next : std_logic_vector(7 downto 0);
+	signal grafp3_dma_load : std_logic;
+	signal grafp3_dma_next : std_logic_vector(7 downto 0);
+	signal odd_scanline_next : std_logic;
+	signal odd_scanline_reg : std_logic;
+	
+	signal pmg_dma_state_next : std_logic_vector(2 downto 0);
+	signal pmg_dma_state_reg : std_logic_vector(2 downto 0);
+	constant pmg_dma_missile : std_logic_vector(2 downto 0) := "000";
+	constant pmg_dma_player0 : std_logic_vector(2 downto 0) := "001";
+	constant pmg_dma_player1 : std_logic_vector(2 downto 0) := "010";
+	constant pmg_dma_player2 : std_logic_vector(2 downto 0) := "011";
+	constant pmg_dma_player3 : std_logic_vector(2 downto 0) := "100";
+	constant pmg_dma_done    : std_logic_vector(2 downto 0) := "101";	
+	constant pmg_dma_instruction : std_logic_vector(2 downto 0) := "110";	
+
+	-- work out which an section we are in for gtia modes
+	signal hpos_alt_reg : std_logic;
+	signal hpos_alt_next : std_logic;
+	
+	signal GTIA_PF0 : std_logic_vector(7 downto 0);
+	signal GTIA_PF1 : std_logic_vector(7 downto 0);
+	signal GTIA_PF2 : std_logic_vector(7 downto 0);
+	signal GTIA_ACTIVE_HR : std_logic_vector(1 downto 0);
+	signal GTIA_HIGHRES : std_logic;
+	signal GTIA_PRIOR_VBXE : std_logic_vector(9 downto 0);
+	signal XCOLOR : std_logic;
+
+	signal interlace_switch_count_reg : integer range 0 to 15;
+	signal interlace_switch_count_next : integer range 0 to 15;
+
+	signal interlace_reg : std_logic;
+	signal interlace_next : std_logic;
+	signal interlace_pending_reg : std_logic;
+	signal interlace_pending_next : std_logic;
+
+	signal field_reg : std_logic;
+	signal field_next : std_logic;
+
+begin
+	-- register
+	process(clk,reset_n)
+	begin
+		if (reset_n = '0') then
+			hposp0_raw_reg <= (others=>'0');
+			hposp1_raw_reg <= (others=>'0');
+			hposp2_raw_reg <= (others=>'0');
+			hposp3_raw_reg <= (others=>'0');
+
+			hposm0_raw_reg <= (others=>'0');
+			hposm1_raw_reg <= (others=>'0');
+			hposm2_raw_reg <= (others=>'0');
+			hposm3_raw_reg <= (others=>'0');			
+
+			sizep0_raw_reg <= (others=>'0');
+			sizep1_raw_reg <= (others=>'0');
+			sizep2_raw_reg <= (others=>'0');
+			sizep3_raw_reg <= (others=>'0');
+
+			sizem_raw_reg <= (others=>'0');
+			
+			grafp0_reg <= (others=>'0');
+			grafp1_reg <= (others=>'0');
+			grafp2_reg <= (others=>'0');
+			grafp3_reg <= (others=>'0');
+
+			grafm_reg <= (others=>'0');
+			
+			colpm0_raw_reg <= (others=>'0');
+			colpm1_raw_reg <= (others=>'0');
+			colpm2_raw_reg <= (others=>'0');
+			colpm3_raw_reg <= (others=>'0');
+
+			colpf0_raw_reg <= (others=>'0');
+			colpf1_raw_reg <= (others=>'0');
+			colpf2_raw_reg <= (others=>'0');
+			colpf3_raw_reg <= (others=>'0');
+			
+			colbk_raw_reg <= (others=>'0');
+			
+			prior_raw_reg <= (others=>'0');
+			
+			vdelay_reg <= (others=>'0');
+			
+			gractl_reg <= (others=>'0');
+			
+			consol_output_reg <= (others=>'1');
+			
+			COLOUR_REG <= (OTHERS=>'0');
+			COLOUR_SAVED_REG <= (OTHERS=>'0');
+			PALETTE_REG <= (OTHERS=>'0');
+			OV_PALETTE_REG <= (OTHERS=>'0');
+			PF_PALETTE_REG <= (OTHERS=>'0');
+			
+			csync_reg <= '0';
+			vsync_reg <= '0';
+			vsync_half_reg <= '0';
+			hsync_reg <= '0';
+			burst_reg <= '0';
+			hblank_reg <= '0';
+			
+			an_prev_reg <= (others=>'0');
+			an_prev2_reg <= (others=>'0');
+			an_prev3_reg <= (others=>'0');
+			
+			highres_reg <= '0';
+			active_hr_reg <= (others=>'0');
+			
+			trig_reg <= (others=>'0');
+			
+			odd_scanline_reg <= '0';
+			
+			pmg_dma_state_reg <= pmg_dma_done;
+			
+			m0pf_reg <= (others=>'0');
+			m1pf_reg <= (others=>'0');
+			m2pf_reg <= (others=>'0');
+			m3pf_reg <= (others=>'0');
+			m0pl_reg <= (others=>'0');
+			m1pl_reg <= (others=>'0');
+			m2pl_reg <= (others=>'0');
+			m3pl_reg <= (others=>'0');
+			
+			p0pf_reg <= (others=>'0');
+			p1pf_reg <= (others=>'0');
+			p2pf_reg <= (others=>'0');
+			p3pf_reg <= (others=>'0');
+			p0pl_reg <= (others=>'0');
+			p1pl_reg <= (others=>'0');
+			p2pl_reg <= (others=>'0');
+			p3pl_reg <= (others=>'0');	
+			
+			active_bk_modify_reg <= (others=>'0');
+			active_bk_valid_reg <= (others=>'0');
+
+			hposp0_snap_reg <= (others=>'0');
+			hposp1_snap_reg <= (others=>'0');
+			hposp2_snap_reg <= (others=>'0');
+			hposp3_snap_reg <= (others=>'0');
+			hposm0_snap_reg <= (others=>'0');
+			hposm1_snap_reg <= (others=>'0');
+			hposm2_snap_reg <= (others=>'0');
+			hposm3_snap_reg <= (others=>'0');
+			sizep0_snap_reg <= (others=>'0');
+			sizep1_snap_reg <= (others=>'0');
+			sizep2_snap_reg <= (others=>'0');
+			sizep3_snap_reg <= (others=>'0');
+			 sizem_snap_reg <= (others=>'0');
+			colpm0_snap_reg <= (others=>'0');
+			colpm1_snap_reg <= (others=>'0');
+			colpm2_snap_reg <= (others=>'0');
+			colpm3_snap_reg <= (others=>'0');
+			colpf0_snap_reg <= (others=>'0');
+			colpf1_snap_reg <= (others=>'0');
+			colpf2_snap_reg <= (others=>'0');
+			colpf3_snap_reg <= (others=>'0');
+			 colbk_snap_reg <= (others=>'0');
+			 prior_snap_reg <= (others=>'0');
+
+			hpos_alt_reg <= '0';
+
+			invisible_live_reg <= '0';
+			gtia_prior_reg <= (others => '0');
+
+			field_reg <= '0';
+			interlace_reg <= '0';
+			interlace_pending_reg <= '0';
+			interlace_switch_count_reg <= 0;
+
+		elsif (clk'event and clk='1') then
+			hposp0_raw_reg <= hposp0_raw_next;
+			hposp1_raw_reg <= hposp1_raw_next;
+			hposp2_raw_reg <= hposp2_raw_next;
+			hposp3_raw_reg <= hposp3_raw_next;
+
+			hposm0_raw_reg <= hposm0_raw_next;
+			hposm1_raw_reg <= hposm1_raw_next;
+			hposm2_raw_reg <= hposm2_raw_next;
+			hposm3_raw_reg <= hposm3_raw_next;
+
+			sizep0_raw_reg <= sizep0_raw_next;
+			sizep1_raw_reg <= sizep1_raw_next;
+			sizep2_raw_reg <= sizep2_raw_next;
+			sizep3_raw_reg <= sizep3_raw_next;
+
+			sizem_raw_reg <= sizem_raw_next;
+			
+			grafp0_reg <= grafp0_next;
+			grafp1_reg <= grafp1_next;
+			grafp2_reg <= grafp2_next;
+			grafp3_reg <= grafp3_next;
+
+			grafm_reg <= grafm_next;
+			
+			colpm0_raw_reg <= colpm0_raw_next;
+			colpm1_raw_reg <= colpm1_raw_next;
+			colpm2_raw_reg <= colpm2_raw_next;
+			colpm3_raw_reg <= colpm3_raw_next;
+
+			colpf0_raw_reg <= colpf0_raw_next;
+			colpf1_raw_reg <= colpf1_raw_next;
+			colpf2_raw_reg <= colpf2_raw_next;
+			colpf3_raw_reg <= colpf3_raw_next;
+			
+			colbk_raw_reg <= colbk_raw_next;
+			
+			prior_raw_reg <= prior_raw_next;
+			
+			vdelay_reg <= vdelay_next;
+			
+			gractl_reg <= gractl_next;
+			
+			consol_output_reg <= consol_output_next;		
+
+			COLOUR_REG <= colour_next;
+			COLOUR_SAVED_REG <= COLOUR_SAVED_NEXT;
+			PALETTE_REG <= PALETTE_NEXT;
+			OV_PALETTE_REG <= OV_PALETTE_NEXT;
+			PF_PALETTE_REG <= PF_PALETTE_NEXT;
+			
+			csync_reg <= csync_next;
+			vsync_reg <= vsync_next;
+			vsync_half_reg <= vsync_half_next;
+			hsync_reg <= hsync_next;
+			burst_reg <= burst_next;
+			hblank_reg <= hblank_next;
+			
+			an_prev_reg <= an_prev_next;
+			an_prev2_reg <= an_prev2_next;
+			an_prev3_reg <= an_prev3_next;
+	
+			highres_reg <= highres_next;
+			active_hr_reg <= active_hr_next;
+			
+			trig_reg <= trig_next;
+			
+			odd_scanline_reg <= odd_scanline_next;
+			
+			pmg_dma_state_reg <= pmg_dma_state_next;
+			
+			m0pf_reg <= m0pf_next;
+			m1pf_reg <= m1pf_next;
+			m2pf_reg <= m2pf_next;
+			m3pf_reg <= m3pf_next;
+			m0pl_reg <= m0pl_next;
+			m1pl_reg <= m1pl_next;
+			m2pl_reg <= m2pl_next;
+			m3pl_reg <= m3pl_next;
+			
+			p0pf_reg <= p0pf_next;
+			p1pf_reg <= p1pf_next;
+			p2pf_reg <= p2pf_next;
+			p3pf_reg <= p3pf_next;
+			p0pl_reg <= p0pl_next;
+			p1pl_reg <= p1pl_next;
+			p2pl_reg <= p2pl_next;
+			p3pl_reg <= p3pl_next;
+			
+			active_bk_modify_reg <= active_bk_modify_next;
+			active_bk_valid_reg <= active_bk_valid_next;
+
+			hposp0_snap_reg <= hposp0_snap_next;
+			hposp1_snap_reg <= hposp1_snap_next;
+			hposp2_snap_reg <= hposp2_snap_next;
+			hposp3_snap_reg <= hposp3_snap_next;
+			hposm0_snap_reg <= hposm0_snap_next;
+			hposm1_snap_reg <= hposm1_snap_next;
+			hposm2_snap_reg <= hposm2_snap_next;
+			hposm3_snap_reg <= hposm3_snap_next;
+			sizep0_snap_reg <= sizep0_snap_next;
+			sizep1_snap_reg <= sizep1_snap_next;
+			sizep2_snap_reg <= sizep2_snap_next;
+			sizep3_snap_reg <= sizep3_snap_next;
+			sizem_snap_reg <=  sizem_snap_next;
+			colpm0_snap_reg <= colpm0_snap_next;
+			colpm1_snap_reg <= colpm1_snap_next;
+			colpm2_snap_reg <= colpm2_snap_next;
+			colpm3_snap_reg <= colpm3_snap_next;
+			colpf0_snap_reg <= colpf0_snap_next;
+			colpf1_snap_reg <= colpf1_snap_next;
+			colpf2_snap_reg <= colpf2_snap_next;
+			colpf3_snap_reg <= colpf3_snap_next;
+			colbk_snap_reg <=  colbk_snap_next;
+			prior_snap_reg <=  prior_snap_next;
+
+			hpos_alt_reg <= hpos_alt_next;
+
+			invisible_live_reg <= invisible_live_next;
+			gtia_prior_reg <= gtia_prior_next;
+
+			field_reg <= field_next;
+			interlace_reg <= interlace_next;
+			interlace_pending_reg <= interlace_pending_next;
+			interlace_switch_count_reg <= interlace_switch_count_next;
+
+		end if;
+	end process;
+	
+	-- decode address
+	decode_addr1 : complete_address_decoder
+		generic map(width=>5)
+		port map (addr_in=>addr, addr_decoded=>addr_decoded);
+
+	-- odd/even hpos - for gtia modes
+	process(hpos_alt_reg, colour_clock, reset_counter)
+	begin
+		hpos_alt_next <= hpos_alt_reg;
+		if (colour_clock='1') then
+			hpos_alt_next <= not(hpos_alt_reg);
+		end if;
+
+		if (reset_counter='1') then
+			hpos_alt_next <= '0';
+		end if;
+	end process;
+	
+		
+	-- decode antic input
+	process (AN, COLOUR_CLOCK, an_prev_reg, an_prev2_reg, an_prev3_reg, hblank_reg, vsync_reg, highres_reg, odd_scanline_reg, prior_delayed_reg, prior_delayed2_reg, prior6_prev, hpos_alt_reg, active_p0_live, active_p1_live, active_p2_live, active_p3_live, active_m0_live, active_m1_live, active_m2_live, active_m3_live, active_pf3_collision_live, active_bk_modify_reg, active_bk_modify_next, active_bk_valid_reg, active_hr_reg, hpos_reg)
+	begin	
+		hblank_next <= hblank_reg;
+		reset_counter <= '0';
+		counter_load_value <= (others=>'0');
+		vsync_next <= vsync_reg;
+		
+		odd_scanline_next <= odd_scanline_reg;
+
+		start_of_field <= '0';
+			
+		-- NB high res mode gives pf2 - which is or of the two pixels
+		highres_next <= highres_reg;
+		
+		-- for gtia modes
+		an_prev_next <= an_prev_reg;
+		an_prev2_next <= an_prev2_reg;
+		an_prev3_next <= an_prev3_reg;
+		
+		-- decoded AN
+		visible_live <= '0';
+		
+		active_hr_next <= active_hr_reg;
+		
+		active_bk_modify_next <= active_bk_modify_reg;
+		active_bk_valid_next <= active_bk_valid_reg;
+		active_bk_live <= '0';
+		active_pf0_live <= '0';
+		active_pf1_live <= '0';
+		active_pf2_live <= '0';
+		active_pf2_collision_live <= '0';
+		active_pf3_live <= '0';
+		active_pf3_collision_live <= '0';
+		active_pm0_live <= '0';
+		active_pm1_live <= '0';
+		active_pm2_live <= '0';
+		active_pm3_live <= '0';
+		
+		if (COLOUR_CLOCK = '1') then	
+			visible_live <= '1';
+			vsync_next <= '0';
+			hblank_next <= '0';
+			an_prev_next <= an;
+			an_prev2_next <= an_prev_reg;
+			an_prev3_next <= an_prev2_reg;
+			
+			active_pm0_live <= active_p0_live or (active_m0_live and not(prior_delayed_reg(4)));
+			active_pm1_live <= active_p1_live or (active_m1_live and not(prior_delayed_reg(4)));
+			active_pm2_live <= active_p2_live or (active_m2_live and not(prior_delayed_reg(4)));
+			active_pm3_live <= active_p3_live or (active_m3_live and not(prior_delayed_reg(4)));			
+			
+			active_bk_modify_next <= (others=>'0');
+			active_bk_valid_next <= (others=>'1');
+			
+			active_hr_next <= (others=>'0');
+		
+			-- 000 background colour
+			-- 001 vsync
+			-- 01X hsync (low bit is high res mode - i.e. 2 pixels per colour clock)
+			-- 1XX colour 0 to colour 3
+			
+			-- in gtia modes then we listen for 2 colour clocks to get one pixels
+			-- 1ZY (giving signal ZYXV for 4 bit colour reg/luminance - unfortunately we only have 9 colour regs!)
+			-- 1XV
+			
+			if (highres_reg = '1' and prior_delayed_reg(7 downto 6)="00") then
+				if (an(2) = '1') then
+					active_hr_next <= AN(1 downto 0);				
+				end if;
+				
+				active_bk_live <= not(an(2)) and not(an(1)) and not(an(0));
+				active_pf0_live <= '0';
+				active_pf1_live <= '0';
+				active_pf2_live <= an(2);
+				active_pf2_collision_live <= an(2) and (an(1) or an(0));
+				active_pf3_collision_live <= '0';
+			else
+				-- gtia modes
+				case prior_delayed_reg(7 downto 6) is
+					when "00" => 
+						-- normal mode
+						if prior6_prev = '1' then
+							active_bk_live <= not(an_prev_reg(2)) and not(an_prev_reg(1)) and not(an_prev_reg(0));
+							active_pf0_live <= an_prev_reg(2) and not(an_prev_reg(1)) and not(an_prev_reg(0));
+							active_pf1_live <= an_prev_reg(2) and not(an_prev_reg(1)) and an_prev_reg(0);
+							active_pf2_live <= an_prev_reg(2) and      an_prev_reg(1) and not(an_prev_reg(0));
+							active_pf2_collision_live <= an_prev_reg(2) and      an_prev_reg(1) and not(an_prev_reg(0));
+							active_pf3_collision_live <= an_prev_reg(2) and      an_prev_reg(1) and an_prev_reg(0);
+						else
+							active_bk_live <= not(an(2)) and not(an(1)) and not(an(0));
+							active_pf0_live <= an(2) and not(an(1)) and not(an(0));
+							active_pf1_live <= an(2) and not(an(1)) and an(0);
+							active_pf2_live <= an(2) and      an(1) and not(an(0));
+							active_pf2_collision_live <= an(2) and      an(1) and not(an(0));
+							active_pf3_collision_live <= an(2) and      an(1) and an(0);
+						end if;
+					when "01" =>
+						-- 1 colour/16 luminance
+						-- no playfield collisions
+						-- 5th player gets my luminance
+						active_pf0_live <= '0';
+						active_pf1_live <= '0';
+						active_pf2_live <= '0';
+						active_pf2_collision_live <= '0';
+						active_pf3_collision_live <= '0';						
+						active_bk_live <= '1';
+						
+						if (hpos_alt_reg = '1') then
+							active_bk_modify_next(3 downto 0) <= an_prev_reg(1 downto 0)&an(1 downto 0);
+						else
+							active_bk_modify_next(3 downto 0) <= active_bk_modify_reg(3 downto 0);
+						end if;
+					when "10" => 
+						-- 9 colour
+						-- playfield collisions
+						-- no missile/player collisions from 'playfield' data though		
+						-- offset by 1 colour clock...
+						if (hpos_alt_reg = '1') then
+							active_bk_live <= '0';
+							active_pf0_live <= '0';
+							active_pf1_live <= '0';
+							active_pf2_live <= '0';
+							active_pf2_collision_live <= '0';
+							active_pf3_collision_live <= '0';
+														
+							case an_prev_reg(1 downto 0)&an(1 downto 0) is
+								when "0000" =>
+									active_pm0_live <= '1';
+								when "0001" =>
+									active_pm1_live <= '1';
+								when "0010" =>
+									active_pm2_live <= '1';
+								when "0011" =>								
+									active_pm3_live <= '1';
+								when "0100"|"1100" =>
+									active_pf0_live <= an(2);
+									active_bk_live <= not(an(2));
+								when "0101"|"1101" =>
+									active_pf1_live <= an(2);
+									active_bk_live <= not(an(2));
+								when "0110"|"1110" =>
+									active_pf2_live <= an(2);
+									active_pf2_collision_live <= an(2);
+									active_bk_live <= not(an(2));
+								when "0111"|"1111" =>								
+									active_pf3_collision_live <= an(2);
+									active_bk_live <= not(an(2));
+								when others =>
+									active_bk_live <= '1';
+							end case;
+						else
+							active_bk_live <= '0';
+							active_pf0_live <= '0';
+							active_pf1_live <= '0';
+							active_pf2_live <= '0';
+							active_pf2_collision_live <= '0';
+							active_pf3_collision_live <= '0';
+														
+							case an_prev2_reg(1 downto 0)&an_prev_reg(1 downto 0) is
+								when "0000" =>
+									active_pm0_live <= '1';
+								when "0001" =>
+									active_pm1_live <= '1';
+								when "0010" =>
+									active_pm2_live <= '1';
+								when "0011" =>								
+									active_pm3_live <= '1';
+								when "0100"|"1100" =>
+									active_pf0_live <= an_prev_reg(2);
+									active_bk_live <= not(an_prev_reg(2));
+								when "0101"|"1101" =>
+									active_pf1_live <= an_prev_reg(2);
+									active_bk_live <= not(an_prev_reg(2));
+								when "0110"|"1110" =>
+									active_pf2_live <= an_prev_reg(2);
+									active_pf2_collision_live <= an_prev_reg(2);
+									active_bk_live <= not(an_prev_reg(2));
+								when "0111"|"1111" =>								
+									active_pf3_collision_live <= an_prev_reg(2);
+									active_bk_live <= not(an_prev_reg(2));
+								when others =>
+									active_bk_live <= '1';
+							end case;									
+						end if;
+						
+					when "11" =>
+						-- 16 colour/1 luminance
+						-- no playfield collisions
+						-- 5th player gets our luminance
+						active_bk_live <= '1';
+						active_pf0_live <= '0';
+						active_pf1_live <= '0';
+						active_pf2_live <= '0';
+						active_pf2_collision_live <= '0';
+						active_pf3_collision_live <= '0';	
+						if (hpos_alt_reg = '1') then
+							active_bk_modify_next(7 downto 4) <= an_prev_reg(1 downto 0)&an(1 downto 0);
+						else
+							active_bk_modify_next(7 downto 4) <= active_bk_modify_reg(7 downto 4);
+						end if;
+						
+						if (active_bk_modify_next(7 downto 4) = "0000") then
+							active_bk_valid_next(3 downto 0) <= "0000";
+						end if;
+					when others =>
+						-- nop
+				end case;
+			end if;
+			
+			if (prior_delayed_reg(4) = '1') then
+				active_pf3_live <= active_pf3_collision_live or active_m0_live or active_m1_live or active_m2_live or active_m3_live;
+			else
+				active_pf3_live <= active_pf3_collision_live;
+			end if;
+			
+			if (not (prior_delayed2_reg(7 downto 6) = "00")) then
+				-- force off flip flop when in gtia mode
+				highres_next <= '0';
+			end if;
+			
+			-- hblank
+			if (an_prev_reg(2 downto 1) = "01") then
+				hblank_next <= '1';
+				active_bk_live <= '0';
+				active_pf0_live <= '0';
+				active_pf1_live <= '0';
+				active_pf2_live <= '0';
+				active_pf2_collision_live <= '0';
+				active_pf3_live <= '0';
+				active_pf3_collision_live <= '0';
+				highres_next <= an_prev_reg(0);
+			
+				if (hblank_reg = '0' and vsync_reg = '0') then
+					reset_counter <= '1';
+					counter_load_value <= X"E0"; -- 2 lower than antic
+					odd_scanline_next <= not(odd_scanline_reg);
+				end if;
+			end if;
+			if (an(2 downto 1) = "01") then
+				visible_live <= '0';
+			end if;			
+	
+			-- vsync
+			if (an_prev_reg = "001") then
+				active_bk_live <= '0';
+				active_pf0_live <= '0';
+				active_pf1_live <= '0';
+				active_pf2_live <= '0';
+				active_pf2_collision_live <= '0';
+				active_pf3_live <= '0';
+				active_pf3_collision_live <= '0';
+				
+				vsync_next <= '1';
+
+				odd_scanline_next <= '0';
+				
+				visible_live <= '0';
+
+				start_of_field <= not(vsync_reg);
+			end if;
+			
+			-- during vblank we reset our own counter - since Antic does not clear hblank_reg
+			if (hpos_reg = X"E3" and COLOUR_CLOCK='1') then
+				reset_counter <= '1';
+				counter_load_value <= X"00";
+			end if;
+
+		end if;
+	end process;
+	
+	-- hpos
+	counter_hpos : simple_counter
+		generic map (COUNT_WIDTH=>8)
+		port map (clk=>clk, reset_n=>reset_n, increment=>COLOUR_CLOCK, load=>reset_counter, load_value=>counter_load_value, current_value=>hpos_reg);
+	
+	process(hpos_reg, clip_sides)
+	begin		
+		invisible_clip <= '0';
+		
+		if unsigned(hpos_reg) < to_unsigned(45,8) then
+			invisible_clip <= clip_sides;
+		end if;
+		
+		if unsigned(hpos_reg) > to_unsigned(212,8) then
+			invisible_clip <= clip_sides;
+		end if;		
+	end process;
+
+	process(invisible_live_reg, visible_live, colour_clock)
+	begin
+		invisible_live_next <= invisible_live_reg;
+		if colour_clock = '1' then
+			invisible_live_next <= not(visible_live);
+		end if;
+	end process;
+	
+	-- generate hsync and csync, and also vsync_half
+	process(hpos_reg, hsync_reg, hsync_end, csync_reg, csync_end, burst_reg, burst_end, vsync_reg, vsync_next, vsync_half_reg)
+	begin
+		hsync_start <= '0';
+		hsync_next <= hsync_reg;
+		vsync_half_next <= vsync_half_reg;
+
+		csync_start <= '0';
+		csync_next <= csync_reg;
+	
+		burst_start <= '0';
+		burst_next <= burst_reg;
+
+		-- 6E probably the exact half scanline away from "regular" vsync
+		if (unsigned(hpos_reg) = X"6E") then
+			vsync_half_next <= vsync_reg;
+		end if;
+
+		if (unsigned(hpos_reg) = X"D4") then
+			csync_start <= vsync_reg;
+			csync_next <= vsync_reg;
+		end if;
+	
+		if (unsigned(hpos_reg) = X"0") then
+			csync_start <= not(vsync_reg);
+			csync_next <= not(vsync_reg);
+						
+			hsync_start <= '1';
+			hsync_next <= '1';
+		end if;
+
+		if (unsigned(hpos_reg) = X"14" and vsync_reg = '0' ) then
+			burst_start <= '1';
+			burst_next <= '1';
+		end if;
+		
+		if (hsync_end = '1') then
+			hsync_next <= '0';
+		end if;		
+			
+		if (csync_end = '1') then
+			csync_next <= '0';
+		end if;
+
+		if (burst_end = '1') then
+			burst_next <= '0';
+		end if;
+		
+		if (vsync_next = '0' and vsync_reg = '1') then
+			csync_next <= '0';
+		end if;
+	end process;
+
+	hsync_delay : delay_line
+		generic map (COUNT=>15)
+		port map(clk=>clk,sync_reset=>'0',data_in=>hsync_start,enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>hsync_end);	
+		
+	csync_delay : delay_line
+		generic map (COUNT=>15)
+		port map(clk=>clk,sync_reset=>'0',data_in=>csync_start,enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>csync_end);			
+
+	burst_delay : delay_line
+		generic map (COUNT=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>burst_start,enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>burst_end);	
+
+	-- pmg dma
+	process(CPU_ENABLE_ORIGINAL,antic_fetch,memory_data_in,hsync_start,pmg_dma_state_reg,gractl_reg,odd_scanline_reg,vdelay_reg,grafm_reg, visible_live,hpos_reg, hblank_reg)
+	begin
+		pmg_dma_state_next <= pmg_dma_state_reg;
+		grafm_dma_load <= '0';
+		grafm_dma_next <= grafm_reg;		
+		grafp0_dma_load <= '0';
+		grafp0_dma_next <= (others=>'0');
+		grafp1_dma_load <= '0';
+		grafp1_dma_next <= (others=>'0');
+		grafp2_dma_load <= '0';
+		grafp2_dma_next <= (others=>'0');
+		grafp3_dma_load <= '0';
+		grafp3_dma_next <= (others=>'0');
+	
+		-- pull pmg data from bus
+		if (hpos_reg = X"E1") then
+			pmg_dma_state_next <= pmg_dma_missile;
+		end if;
+		
+		-- we start from the first antic fetch
+		-- TODO - CPU enable does not identify next 'antic' cycle in turbo mode...
+		case pmg_dma_state_reg is
+			when pmg_dma_missile =>
+				if (antic_fetch = '1' and cpu_enable_original = '1' and hblank_reg = '1' and visible_live = '0' and hpos_reg(7 downto 4) = "0000") then
+					-- here we have the missile0					
+					grafm_dma_load <= gractl_reg(0);
+				
+					if ((odd_scanline_reg or not(vdelay_reg(0))) = '1') then
+						grafm_dma_next(1 downto 0) <= memory_data_in(1 downto 0);
+					end if;
+					if ((odd_scanline_reg or not(vdelay_reg(1))) = '1') then
+						grafm_dma_next(3 downto 2) <= memory_data_in(3 downto 2);
+					end if;
+					if ((odd_scanline_reg or not(vdelay_reg(2))) = '1') then
+						grafm_dma_next(5 downto 4) <= memory_data_in(5 downto 4);
+					end if;
+					if ((odd_scanline_reg or not(vdelay_reg(3))) = '1') then
+						grafm_dma_next(7 downto 6) <= memory_data_in(7 downto 6);
+					end if;
+					
+					pmg_dma_state_next <= pmg_dma_instruction;
+				end if;
+			when pmg_dma_instruction =>
+				if (CPU_ENABLE_ORIGINAL = '1') then
+					pmg_dma_state_next <= pmg_dma_player0;
+				end if;			
+			when pmg_dma_player0 =>
+				if (CPU_ENABLE_ORIGINAL = '1') then
+					-- here we have player0
+					grafp0_dma_next <= memory_data_in;				
+					grafp0_dma_load <= gractl_reg(1) and (odd_scanline_reg or not(vdelay_reg(4)));
+					pmg_dma_state_next <= pmg_dma_player1;
+				end if;
+			when pmg_dma_player1 =>
+				if (CPU_ENABLE_ORIGINAL = '1') then
+					-- here we have player1
+					grafp1_dma_next <= memory_data_in;
+					grafp1_dma_load <= gractl_reg(1) and (odd_scanline_reg or not(vdelay_reg(5)));
+					pmg_dma_state_next <= pmg_dma_player2;
+				end if;
+			when pmg_dma_player2 =>
+				if (CPU_ENABLE_ORIGINAL = '1') then
+					-- here we have player1
+					grafp2_dma_next <= memory_data_in;
+					grafp2_dma_load <= gractl_reg(1) and (odd_scanline_reg or not(vdelay_reg(6)));
+					pmg_dma_state_next <= pmg_dma_player3;
+				end if;				
+			when pmg_dma_player3 =>
+				if (CPU_ENABLE_ORIGINAL = '1') then
+					-- here we have player1
+					grafp3_dma_next <= memory_data_in;				
+					grafp3_dma_load <= gractl_reg(1) and (odd_scanline_reg or not(vdelay_reg(7)));
+					pmg_dma_state_next <= pmg_dma_done;
+				end if;
+			when others =>
+				-- nop
+		end case;
+	end process;
+		
+	-- pmg display - same for all pmgs
+	-- TODO: priority
+	player0 : gtia_player
+		port map(clk=>clk,reset_n=>reset_n,colour_enable=>COLOUR_CLOCK,live_position=>hpos_reg,player_position=>hposp0_delayed_reg,size=>sizep0_delayed_reg(1 downto 0),bitmap=>grafp0_reg, output=>active_p0_live);	
+	player1 : gtia_player
+		port map(clk=>clk,reset_n=>reset_n,colour_enable=>COLOUR_CLOCK,live_position=>hpos_reg,player_position=>hposp1_delayed_reg,size=>sizep1_delayed_reg(1 downto 0),bitmap=>grafp1_reg, output=>active_p1_live);	
+	player2 : gtia_player
+		port map(clk=>clk,reset_n=>reset_n,colour_enable=>COLOUR_CLOCK,live_position=>hpos_reg,player_position=>hposp2_delayed_reg,size=>sizep2_delayed_reg(1 downto 0),bitmap=>grafp2_reg, output=>active_p2_live);	
+	player3 : gtia_player
+		port map(clk=>clk,reset_n=>reset_n,colour_enable=>COLOUR_CLOCK,live_position=>hpos_reg,player_position=>hposp3_delayed_reg,size=>sizep3_delayed_reg(1 downto 0),bitmap=>grafp3_reg, output=>active_p3_live);				
+
+	grafm_reg10_extended <= grafm_reg(1 downto 0)&"000000";
+	grafm_reg32_extended <= grafm_reg(3 downto 2)&"000000";
+	grafm_reg54_extended <= grafm_reg(5 downto 4)&"000000";
+	grafm_reg76_extended <= grafm_reg(7 downto 6)&"000000";
+	missile0 : gtia_player
+		port map(clk=>clk,reset_n=>reset_n,colour_enable=>COLOUR_CLOCK,live_position=>hpos_reg,player_position=>hposm0_delayed_reg,size=>sizem_delayed_reg(1 downto 0),bitmap=>grafm_reg10_extended, output=>active_m0_live);
+	missile1 : gtia_player
+		port map(clk=>clk,reset_n=>reset_n,colour_enable=>COLOUR_CLOCK,live_position=>hpos_reg,player_position=>hposm1_delayed_reg,size=>sizem_delayed_reg(3 downto 2),bitmap=>grafm_reg32_extended, output=>active_m1_live);
+	missile2 : gtia_player
+		port map(clk=>clk,reset_n=>reset_n,colour_enable=>COLOUR_CLOCK,live_position=>hpos_reg,player_position=>hposm2_delayed_reg,size=>sizem_delayed_reg(5 downto 4),bitmap=>grafm_reg54_extended, output=>active_m2_live);
+	missile3 : gtia_player
+		port map(clk=>clk,reset_n=>reset_n,colour_enable=>COLOUR_CLOCK,live_position=>hpos_reg,player_position=>hposm3_delayed_reg,size=>sizem_delayed_reg(7 downto 6),bitmap=>grafm_reg76_extended, output=>active_m3_live);
+		
+	-- calculate atari colour
+	priority_store : gtia_priority_store
+		port map(clk=>clk, colour_enable=>colour_clock, prior=>prior_delayed_reg,p0=>active_pm0_live,p1=>active_pm1_live,p2=>active_pm2_live,p3=>active_pm3_live,pf0=>active_pf0_live,pf1=>active_pf1_live,pf2=>active_pf2_live,pf3=>active_pf3_live,bk=>active_bk_live,prior_out=>set_prior_pre,p0_out=>set_p0_pre,p1_out=>set_p1_pre,p2_out=>set_p2_pre,p3_out=>set_p3_pre,pf0_out=>set_pf0_pre,pf1_out=>set_pf1_pre,pf2_out=>set_pf2_pre,pf3_out=>set_pf3_pre,bk_out=>set_bk_pre);
+
+	priority_rules : gtia_priority
+		port map(prior=>set_prior_adj,p0=>set_p0_adj,p1=>set_p1_adj,p2=>set_p2_adj,p3=>set_p3_adj,pf0=>set_pf0_adj,pf1=>set_pf1_adj,pf2=>set_pf2_adj,pf3=>set_pf3_adj,bk=>set_bk_adj,p0_out=>set_p0_gtia,p1_out=>set_p1_gtia,p2_out=>set_p2_gtia,p3_out=>set_p3_gtia,pf0_out=>set_pf0_gtia,pf1_out=>set_pf1_gtia,pf2_out=>set_pf2_gtia,pf3_out=>set_pf3_gtia,bk_out=>set_bk_gtia);
+
+	priority_rules_vbxe : gtia_priority
+		port map(prior=>set_prior_adj,p0=>gtia_prior_vbxe(0),p1=>gtia_prior_vbxe(1),p2=>gtia_prior_vbxe(2),p3=>gtia_prior_vbxe(3),pf0=>gtia_prior_vbxe(4),pf1=>gtia_prior_vbxe(5),pf2=>gtia_prior_vbxe(6),pf3=>gtia_prior_vbxe(7),bk=>gtia_prior_vbxe(8),p0_out=>set_p0_vbxe,p1_out=>set_p1_vbxe,p2_out=>set_p2_vbxe,p3_out=>set_p3_vbxe,pf0_out=>set_pf0_vbxe,pf1_out=>set_pf1_vbxe,pf2_out=>set_pf2_vbxe,pf3_out=>set_pf3_vbxe,bk_out=>set_bk_vbxe);
+
+	-- For VBXE display we need to do things more often, and with a slight phase shift (one highres clock)
+
+	clip_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>invisible_clip,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>invisible_clip_adj);	
+
+	visible_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>invisible_live_reg,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>invisible_live_adj);	
+
+	highres_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>highres_reg,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>highres_adj);	
+
+	set_prior_delay : wide_delay_line
+	generic map (COUNT=>1, WIDTH =>5)
+	port map(clk=>clk,sync_reset=>'0',data_in=>set_prior_pre,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>set_prior_adj);	
+
+	set_bk_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>set_bk_pre,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>set_bk_adj);	
+
+	set_pf0_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>set_pf0_pre,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>set_pf0_adj);	
+
+	set_pf1_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>set_pf1_pre,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>set_pf1_adj);	
+
+	set_pf2_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>set_pf2_pre,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>set_pf2_adj);	
+
+	set_pf3_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>set_pf3_pre,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>set_pf3_adj);	
+
+	set_p0_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>set_p0_pre,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>set_p0_adj);	
+
+	set_p1_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>set_p1_pre,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>set_p1_adj);	
+
+	set_p2_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>set_p2_pre,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>set_p2_adj);	
+
+	set_p3_delay : delay_line
+	generic map (COUNT=>1)
+	port map(clk=>clk,sync_reset=>'0',data_in=>set_p3_pre,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>set_p3_adj);	
+
+	active_hr_delay : wide_delay_line
+	generic map (COUNT=>1, WIDTH =>2)
+	port map(clk=>clk,sync_reset=>'0',data_in=>active_hr_reg,enable=>colour_clock_highres,reset_n=>reset_n,data_out=>active_hr_adj);	
+
+	gtia_prior_adj <= '0' & set_bk_adj & set_pf3_adj & set_pf2_adj & set_pf1_adj & set_pf0_adj & set_p3_adj & set_p2_adj & set_p1_adj & set_p0_adj;
+
+	set_bk <= set_bk_vbxe when gtia_prior_vbxe(9) = '1' else set_bk_gtia;
+	set_pf0 <= set_pf0_vbxe when gtia_prior_vbxe(9) = '1' else set_pf0_gtia;
+	set_pf1 <= set_pf1_vbxe when gtia_prior_vbxe(9) = '1' else set_pf1_gtia;
+	set_pf2 <= set_pf2_vbxe when gtia_prior_vbxe(9) = '1' else set_pf2_gtia;
+	set_pf3 <= set_pf3_vbxe when gtia_prior_vbxe(9) = '1' else set_pf3_gtia;
+	set_p0 <= set_p0_vbxe when gtia_prior_vbxe(9) = '1' else set_p0_gtia;
+	set_p1 <= set_p1_vbxe when gtia_prior_vbxe(9) = '1' else set_p1_gtia;
+	set_p2 <= set_p2_vbxe when gtia_prior_vbxe(9) = '1' else set_p2_gtia;
+	set_p3 <= set_p3_vbxe when gtia_prior_vbxe(9) = '1' else set_p3_gtia;
+
+	xcolor <= vbxe_xcolor or gtia_xcolor;
+
+	process(set_p0,set_p1,set_p2,set_p3,set_pf0,set_pf1,set_pf2,set_pf3,set_bk,
+		colbk_adj,colpf0_adj,colpf1_adj,colpf2_adj,colpf3_adj,colpm0_adj,colpm1_adj,colpm2_adj,colpm3_adj,
+		colour_clock,colour_reg,
+		highres_adj,gtia_active_hr,gtia_prior_adj,gtia_highres,colour_saved_reg,ov_palette_reg,pf_palette_reg,
+		colour_clock_highres,colour_clock_vbxe,vbxe_pf_palette,vbxe_ov_palette,vbxe_ov_pixel,vbxe_ov_pixel_active,
+		vbxe_xcolor,gtia_xcolor,xcolor,gtia_pf0,gtia_pf1,gtia_pf2,gtia_prior_reg,
+		palette_reg,invisible_live_adj,invisible_clip_adj,active_bk_modify_next,active_bk_valid_next,gractl_reg)
+	variable colour : std_logic_vector(7 downto 0);
+	begin
+
+		colour_next <= colour_reg;
+		colour_saved_next <= colour_saved_reg;
+
+		palette_next <= palette_reg;
+		ov_palette_next <= ov_palette_reg;
+		pf_palette_next <= pf_palette_reg;
+		gtia_prior_next <= gtia_prior_reg;
+
+		if colour_clock_highres = '1' then
+			gtia_prior_next <= set_bk & (set_pf3 or set_pf2) & set_pf1 & set_pf0 & set_p3 & set_p2 & set_p1 & set_p0;
+			colour :=
+				((colbk_adj(7 downto 1)&(xcolor and colbk_adj(0)) or active_bk_modify_next) and active_bk_valid_next and repeat(8,set_bk)) or
+				(GTIA_PF0(7 downto 1)&(xcolor and GTIA_PF0(0)) and repeat(8,set_pf0)) or
+				(GTIA_PF1(7 downto 1)&(xcolor and GTIA_PF1(0)) and repeat(8,set_pf1)) or
+				(GTIA_PF2(7 downto 1)&(xcolor and GTIA_PF2(0)) and repeat(8,set_pf2)) or
+				((colpf3_adj(7 downto 1)&(xcolor and colpf3_adj(0)) or active_bk_modify_next) and repeat(8,set_pf3)) or
+				(colpm0_adj(7 downto 1)&(xcolor and colpm0_adj(0)) and repeat(8,set_p0)) or
+				(colpm1_adj(7 downto 1)&(xcolor and colpm1_adj(0)) and repeat(8,set_p1)) or
+				(colpm2_adj(7 downto 1)&(xcolor and colpm2_adj(0)) and repeat(8,set_p2)) or
+				(colpm3_adj(7 downto 1)&(xcolor and colpm3_adj(0)) and repeat(8,set_p3));
+			colour_next <= colour;
+			colour_saved_next <= colour;
+
+			-- high-res mode overrides the luma, unless VBXE xcolor fixed that already
+			if (vbxe_xcolor = '0') and (gtia_highres = '1') and (gtia_active_hr(to_integer(unsigned'('0' & colour_clock))) = '1') and (set_bk = '0') then
+				colour_next(3 downto 0) <= GTIA_PF1(3 downto 1)&(xcolor and GTIA_PF1(0));
+				colour_saved_next(3 downto 0) <= GTIA_PF1(3 downto 1)&(xcolor and GTIA_PF1(0));
+				if (gtia_xcolor or gractl_reg(4)) = '1' then 
+					colour_next(7 downto 4) <= GTIA_PF1(7 downto 4);
+					colour_saved_next(7 downto 4) <= GTIA_PF1(7 downto 4);
+				end if;
+			end if;
+			
+			if (invisible_clip_adj or invisible_live_adj) = '1' then
+				colour_saved_next <= X"00";
+				colour_next <= X"00";
+			end if;			
+		end if;
+
+		if colour_clock_vbxe = '1' then
+			palette_next <= VBXE_PF_PALETTE;
+			if colour_clock_highres = '1' then
+				ov_palette_next <= VBXE_OV_PALETTE;
+				pf_palette_next <= VBXE_PF_PALETTE;
+			end if;
+			if VBXE_OV_PIXEL_ACTIVE = '1' then
+				colour_next <= VBXE_OV_PIXEL;
+				if colour_clock_highres = '1' then
+					palette_next <= VBXE_OV_PALETTE;
+				else
+					palette_next <= ov_palette_reg;
+				end if;
+			else
+				if colour_clock_highres = '0' then
+					colour_next <= colour_saved_reg;
+					palette_next <= pf_palette_reg;
+				end if;
+			end if;
+		end if;
+	end process;
+
+	-- collision detection
+	process (colour_clock, m0pf_reg,m1pf_reg,m2pf_reg,m3pf_reg,m0pl_reg,m1pl_reg,m2pl_reg,m3pl_reg,p0pf_reg,p1pf_reg,p2pf_reg,p3pf_reg,p0pl_reg,p1pl_reg,p2pl_reg,p3pl_reg,hitclr_write,active_pf0_live,active_pf1_live,active_pf2_collision_live,active_pf3_collision_live,active_p0_live,active_p1_live,active_p2_live,active_p3_live,active_m0_live,active_m1_live,active_m2_live,active_m3_live, visible_live)
+	begin
+		m0pf_next <= m0pf_reg;
+		m1pf_next <= m1pf_reg;
+		m2pf_next <= m2pf_reg;
+		m3pf_next <= m3pf_reg;
+		m0pl_next <= m0pl_reg;
+		m1pl_next <= m1pl_reg;
+		m2pl_next <= m2pl_reg;
+		m3pl_next <= m3pl_reg;
+		
+		p0pf_next <= p0pf_reg;
+		p1pf_next <= p1pf_reg;
+		p2pf_next <= p2pf_reg;
+		p3pf_next <= p3pf_reg;
+		p0pl_next <= p0pl_reg;
+		p1pl_next <= p1pl_reg;
+		p2pl_next <= p2pl_reg;
+		p3pl_next <= p3pl_reg;	
+		
+		if (hitclr_write = '1') then
+			m0pf_next <= (others=>'0');
+			m1pf_next <= (others=>'0');
+			m2pf_next <= (others=>'0');
+			m3pf_next <= (others=>'0');
+			m0pl_next <= (others=>'0');
+			m1pl_next <= (others=>'0');
+			m2pl_next <= (others=>'0');
+			m3pl_next <= (others=>'0');
+			
+			p0pf_next <= (others=>'0');
+			p1pf_next <= (others=>'0');
+			p2pf_next <= (others=>'0');
+			p3pf_next <= (others=>'0');
+			p0pl_next <= (others=>'0');
+			p1pl_next <= (others=>'0');
+			p2pl_next <= (others=>'0');
+			p3pl_next <= (others=>'0');
+		else
+			if visible_live = '1' then
+				m0pl_next <= m0pl_reg or (active_m0_live&active_m0_live&active_m0_live&active_m0_live and active_p3_live&active_p2_live&active_p1_live&active_p0_live);
+				m1pl_next <= m1pl_reg or (active_m1_live&active_m1_live&active_m1_live&active_m1_live and active_p3_live&active_p2_live&active_p1_live&active_p0_live);
+				m2pl_next <= m2pl_reg or (active_m2_live&active_m2_live&active_m2_live&active_m2_live and active_p3_live&active_p2_live&active_p1_live&active_p0_live);
+				m3pl_next <= m3pl_reg or (active_m3_live&active_m3_live&active_m3_live&active_m3_live and active_p3_live&active_p2_live&active_p1_live&active_p0_live);
+
+				m0pf_next <= m0pf_reg or (active_m0_live&active_m0_live&active_m0_live&active_m0_live and active_pf3_collision_live&active_pf2_collision_live&active_pf1_live&active_pf0_live);
+				m1pf_next <= m1pf_reg or (active_m1_live&active_m1_live&active_m1_live&active_m1_live and active_pf3_collision_live&active_pf2_collision_live&active_pf1_live&active_pf0_live);
+				m2pf_next <= m2pf_reg or (active_m2_live&active_m2_live&active_m2_live&active_m2_live and active_pf3_collision_live&active_pf2_collision_live&active_pf1_live&active_pf0_live);
+				m3pf_next <= m3pf_reg or (active_m3_live&active_m3_live&active_m3_live&active_m3_live and active_pf3_collision_live&active_pf2_collision_live&active_pf1_live&active_pf0_live);
+				
+				p0pl_next <= p0pl_reg or (active_p0_live&active_p0_live&active_p0_live&'0'        and active_p3_live&active_p2_live&active_p1_live&active_p0_live);
+				p1pl_next <= p1pl_reg or (active_p1_live&active_p1_live&'0'       &active_p1_live and active_p3_live&active_p2_live&active_p1_live&active_p0_live);
+				p2pl_next <= p2pl_reg or (active_p2_live&'0'       &active_p2_live&active_p2_live and active_p3_live&active_p2_live&active_p1_live&active_p0_live);
+				p3pl_next <= p3pl_reg or ('0'       &active_p3_live&active_p3_live&active_p3_live and active_p3_live&active_p2_live&active_p1_live&active_p0_live);	
+				
+				p0pf_next <= p0pf_reg or (active_p0_live&active_p0_live&active_p0_live&active_p0_live and active_pf3_collision_live&active_pf2_collision_live&active_pf1_live&active_pf0_live);
+				p1pf_next <= p1pf_reg or (active_p1_live&active_p1_live&active_p1_live&active_p1_live and active_pf3_collision_live&active_pf2_collision_live&active_pf1_live&active_pf0_live);
+				p2pf_next <= p2pf_reg or (active_p2_live&active_p2_live&active_p2_live&active_p2_live and active_pf3_collision_live&active_pf2_collision_live&active_pf1_live&active_pf0_live);
+				p3pf_next <= p3pf_reg or (active_p3_live&active_p3_live&active_p3_live&active_p3_live and active_pf3_collision_live&active_pf2_collision_live&active_pf1_live&active_pf0_live);			
+			end if;
+		end if;
+		
+	end process;
+
+	-- Writes to registers
+	process(cpu_data_in,wr_en,addr_decoded,hposp0_raw_reg,hposp1_raw_reg,hposp2_raw_reg,hposp3_raw_reg,hposm0_raw_reg,hposm1_raw_reg,hposm2_raw_reg,hposm3_raw_reg,sizep0_raw_reg,sizep1_raw_reg,sizep2_raw_reg,sizep3_raw_reg,sizem_raw_reg,grafp0_reg,grafp1_reg,grafp2_reg,grafp3_reg, grafm_reg, colpm0_raw_reg, colpm1_raw_reg, colpm2_raw_reg, colpm3_raw_reg, colpf0_raw_reg, colpf1_raw_reg,colpf2_raw_reg, colpf3_raw_reg, colbk_raw_reg, prior_raw_reg, vdelay_reg, gractl_reg, consol_output_reg, grafm_dma_load, grafm_dma_next, grafp0_dma_load, grafp0_dma_next, grafp1_dma_load, grafp1_dma_next, grafp2_dma_load, grafp2_dma_next, grafp3_dma_load, grafp3_dma_next)
+	begin
+		hposp0_raw_next <= hposp0_raw_reg;
+		hposp1_raw_next <= hposp1_raw_reg;
+		hposp2_raw_next <= hposp2_raw_reg;
+		hposp3_raw_next <= hposp3_raw_reg;
+
+		hposm0_raw_next <= hposm0_raw_reg;
+		hposm1_raw_next <= hposm1_raw_reg;
+		hposm2_raw_next <= hposm2_raw_reg;
+		hposm3_raw_next <= hposm3_raw_reg;			
+
+		sizep0_raw_next <= sizep0_raw_reg;
+		sizep1_raw_next <= sizep1_raw_reg;
+		sizep2_raw_next <= sizep2_raw_reg;
+		sizep3_raw_next <= sizep3_raw_reg;
+
+		sizem_raw_next <= sizem_raw_reg;
+		
+		grafp0_next <= grafp0_reg;
+		grafp1_next <= grafp1_reg;
+		grafp2_next <= grafp2_reg;
+		grafp3_next <= grafp3_reg;
+
+		grafm_next <= grafm_reg;
+		
+		colpm0_raw_next <= colpm0_raw_reg;
+		colpm1_raw_next <= colpm1_raw_reg;
+		colpm2_raw_next <= colpm2_raw_reg;
+		colpm3_raw_next <= colpm3_raw_reg;
+
+		colpf0_raw_next <= colpf0_raw_reg;
+		colpf1_raw_next <= colpf1_raw_reg;
+		colpf2_raw_next <= colpf2_raw_reg;
+		colpf3_raw_next <= colpf3_raw_reg;
+		
+		colbk_raw_next <= colbk_raw_reg;
+		
+		prior_raw_next <= prior_raw_reg;
+		
+		vdelay_next <= vdelay_reg;
+		
+		gractl_next <= gractl_reg;
+		
+		consol_output_next <= consol_output_reg;	
+		
+		hitclr_write <= '0';
+		
+		if (grafm_dma_load = '1') then
+			grafm_next <= grafm_dma_next;
+		end if;
+
+		if (grafp0_dma_load = '1') then
+			grafp0_next <= grafp0_dma_next;
+		end if;
+
+		if (grafp1_dma_load = '1') then
+			grafp1_next <= grafp1_dma_next;
+		end if;
+
+		if (grafp2_dma_load = '1') then
+			grafp2_next <= grafp2_dma_next;
+		end if;
+
+		if (grafp3_dma_load = '1') then
+			grafp3_next <= grafp3_dma_next;
+		end if;
+		
+		if (wr_en = '1') then
+			if(addr_decoded(0) = '1') then
+				hposp0_raw_next <= cpu_data_in;
+			end if;	
+
+			if(addr_decoded(1) = '1') then
+				hposp1_raw_next <= cpu_data_in;
+			end if;		
+			
+			if(addr_decoded(2) = '1') then
+				hposp2_raw_next <= cpu_data_in;
+			end if;
+
+			if(addr_decoded(3) = '1') then
+				hposp3_raw_next <= cpu_data_in;
+			end if;	
+			
+			if(addr_decoded(4) = '1') then
+				hposm0_raw_next <= cpu_data_in;
+			end if;	
+
+			if(addr_decoded(5) = '1') then
+				hposm1_raw_next <= cpu_data_in;
+			end if;		
+			
+			if(addr_decoded(6) = '1') then
+				hposm2_raw_next <= cpu_data_in;
+			end if;
+
+			if(addr_decoded(7) = '1') then
+				hposm3_raw_next <= cpu_data_in;
+			end if;
+			
+			if(addr_decoded(8) = '1') then
+				sizep0_raw_next <= cpu_data_in(1 downto 0);
+			end if;	
+
+			if(addr_decoded(9) = '1') then
+				sizep1_raw_next <= cpu_data_in(1 downto 0);
+			end if;		
+			
+			if(addr_decoded(10) = '1') then
+				sizep2_raw_next <= cpu_data_in(1 downto 0);
+			end if;
+
+			if(addr_decoded(11) = '1') then
+				sizep3_raw_next <= cpu_data_in(1 downto 0);
+			end if;
+			
+			if(addr_decoded(12) = '1') then
+				sizem_raw_next <= cpu_data_in;
+			end if;	
+
+			if(addr_decoded(13) = '1') then
+				grafp0_next <= cpu_data_in;
+			end if;		
+			
+			if(addr_decoded(14) = '1') then
+				grafp1_next <= cpu_data_in;
+			end if;
+
+			if(addr_decoded(15) = '1') then
+				grafp2_next <= cpu_data_in;
+			end if;			
+			
+			if(addr_decoded(16) = '1') then
+				grafp3_next <= cpu_data_in;
+			end if;	
+
+			if(addr_decoded(17) = '1') then
+				grafm_next <= cpu_data_in;
+			end if;		
+			
+			if(addr_decoded(18) = '1') then
+				colpm0_raw_next <= cpu_data_in(7 downto 0);
+			end if;
+
+			if(addr_decoded(19) = '1') then
+				colpm1_raw_next <= cpu_data_in(7 downto 0);
+			end if;
+
+			if(addr_decoded(20) = '1') then
+				colpm2_raw_next <= cpu_data_in(7 downto 0);
+			end if;	
+
+			if(addr_decoded(21) = '1') then
+				colpm3_raw_next <= cpu_data_in(7 downto 0);
+			end if;		
+			
+			if(addr_decoded(22) = '1') then
+				colpf0_raw_next <= cpu_data_in(7 downto 0);
+			end if;
+
+			if(addr_decoded(23) = '1') then
+				colpf1_raw_next <= cpu_data_in(7 downto 0);
+			end if;									
+
+			if(addr_decoded(24) = '1') then
+				colpf2_raw_next <= cpu_data_in(7 downto 0);
+			end if;	
+
+			if(addr_decoded(25) = '1') then
+				colpf3_raw_next <= cpu_data_in(7 downto 0);
+			end if;		
+			
+			if(addr_decoded(26) = '1') then
+				colbk_raw_next <= cpu_data_in(7 downto 0);
+			end if;
+
+			if(addr_decoded(27) = '1') then
+				prior_raw_next <= cpu_data_in;
+			end if;	
+			
+			if(addr_decoded(28) = '1') then
+				vdelay_next <= cpu_data_in;
+			end if;	
+
+			if(addr_decoded(29) = '1') then
+				gractl_next <= cpu_data_in(4 downto 0);
+			end if;		
+			
+			if(addr_decoded(30) = '1') then
+				-- clear the collision regs
+				hitclr_write <= '1';
+			end if;
+
+			if(addr_decoded(31) = '1') then
+				consol_output_next <= cpu_data_in(3 downto 0);
+			end if;				
+			
+		end if;
+	end process;
+	
+	-- delays...
+	process(enable_179,
+		hposp0_snap_reg,
+		hposp1_snap_reg,
+		hposp2_snap_reg,
+		hposp3_snap_reg,
+		hposm0_snap_reg,
+		hposm1_snap_reg,
+		hposm2_snap_reg,
+		hposm3_snap_reg,
+		sizep0_snap_reg,
+		sizep1_snap_reg,
+		sizep2_snap_reg,
+		sizep3_snap_reg,
+		sizem_snap_reg,
+		colpm0_snap_reg,
+		colpm1_snap_reg,
+		colpm2_snap_reg,
+		colpm3_snap_reg,
+		colpf0_snap_reg,
+		colpf1_snap_reg,
+		colpf2_snap_reg,
+		colpf3_snap_reg,
+		colbk_snap_reg,
+		prior_snap_reg,
+		hposp0_raw_reg,
+		hposp1_raw_reg,
+		hposp2_raw_reg,
+		hposp3_raw_reg,
+		hposm0_raw_reg,
+		hposm1_raw_reg,
+		hposm2_raw_reg,
+		hposm3_raw_reg,
+		sizep0_raw_reg,
+		sizep1_raw_reg,
+		sizep2_raw_reg,
+		sizep3_raw_reg,
+		sizem_raw_reg,
+		colpm0_raw_reg,
+		colpm1_raw_reg,
+		colpm2_raw_reg,
+		colpm3_raw_reg,
+		colpf0_raw_reg,
+		colpf1_raw_reg,
+		colpf2_raw_reg,
+		colpf3_raw_reg,
+		colbk_raw_reg,
+		prior_raw_reg
+	)
+	begin
+		hposp0_snap_next <= hposp0_snap_reg;
+		hposp1_snap_next <= hposp1_snap_reg;
+		hposp2_snap_next <= hposp2_snap_reg;
+		hposp3_snap_next <= hposp3_snap_reg;
+		hposm0_snap_next <= hposm0_snap_reg;
+		hposm1_snap_next <= hposm1_snap_reg;
+		hposm2_snap_next <= hposm2_snap_reg;
+		hposm3_snap_next <= hposm3_snap_reg;
+		sizep0_snap_next <= sizep0_snap_reg;
+		sizep1_snap_next <= sizep1_snap_reg;
+		sizep2_snap_next <= sizep2_snap_reg;
+		sizep3_snap_next <= sizep3_snap_reg;
+		sizem_snap_next <= sizem_snap_reg;
+		colpm0_snap_next <= colpm0_snap_reg;
+		colpm1_snap_next <= colpm1_snap_reg;
+		colpm2_snap_next <= colpm2_snap_reg;
+		colpm3_snap_next <= colpm3_snap_reg;
+		colpf0_snap_next <= colpf0_snap_reg;
+		colpf1_snap_next <= colpf1_snap_reg;
+		colpf2_snap_next <= colpf2_snap_reg;
+		colpf3_snap_next <= colpf3_snap_reg;
+		colbk_snap_next <= colbk_snap_reg;
+		prior_snap_next <= prior_snap_reg;
+
+		if enable_179 = '1' then
+			hposp0_snap_next <= hposp0_raw_reg;
+			hposp1_snap_next <= hposp1_raw_reg;
+			hposp2_snap_next <= hposp2_raw_reg;
+			hposp3_snap_next <= hposp3_raw_reg;
+			hposm0_snap_next <= hposm0_raw_reg;
+			hposm1_snap_next <= hposm1_raw_reg;
+			hposm2_snap_next <= hposm2_raw_reg;
+			hposm3_snap_next <= hposm3_raw_reg;
+			sizep0_snap_next <= sizep0_raw_reg;
+			sizep1_snap_next <= sizep1_raw_reg;
+			sizep2_snap_next <= sizep2_raw_reg;
+			sizep3_snap_next <= sizep3_raw_reg;
+			sizem_snap_next <= sizem_raw_reg;
+			colpm0_snap_next <= colpm0_raw_reg;
+			colpm1_snap_next <= colpm1_raw_reg;
+			colpm2_snap_next <= colpm2_raw_reg;
+			colpm3_snap_next <= colpm3_raw_reg;
+			colpf0_snap_next <= colpf0_raw_reg;
+			colpf1_snap_next <= colpf1_raw_reg;
+			colpf2_snap_next <= colpf2_raw_reg;
+			colpf3_snap_next <= colpf3_raw_reg;
+			colbk_snap_next <= colbk_raw_reg;
+			prior_snap_next <= prior_raw_reg;
+		end if;
+	end process;
+
+	prior_delayed_reg(5 downto 0) <= prior_snap_reg(5 downto 0);
+
+	prior_long_delay : wide_delay_line
+		generic map (COUNT=>1, WIDTH=>2)
+		port map(clk=>clk,sync_reset=>'0',data_in=>prior_snap_reg(7 downto 6),enable=>COLOUR_CLOCK_HIGHRES,reset_n=>reset_n,data_out=>prior_delayed_reg(7 downto 6));
+
+	prior_longer_delay : wide_delay_line
+		generic map (COUNT=>2, WIDTH=>2)
+		port map(clk=>clk,sync_reset=>'0',data_in=>prior_snap_reg(7 downto 6),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>prior_delayed2_reg(7 downto 6));
+
+	prior6_delay : delay_line
+		generic map (COUNT=>1)
+		port map(clk=>clk,sync_reset=>'0',data_in=>prior_delayed_reg(6),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>prior6_prev);
+		
+	colbk_delay : wide_delay_line
+		generic map (COUNT=>1, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>colbk_snap_reg,enable=>COLOUR_CLOCK_HIGHRES,reset_n=>reset_n,data_out=>colbk_adj);
+
+	colpm0_delay : wide_delay_line
+		generic map (COUNT=>1, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>colpm0_snap_reg,enable=>COLOUR_CLOCK_HIGHRES,reset_n=>reset_n,data_out=>colpm0_adj);
+	colpm1_delay : wide_delay_line
+		generic map (COUNT=>1, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>colpm1_snap_reg,enable=>COLOUR_CLOCK_HIGHRES,reset_n=>reset_n,data_out=>colpm1_adj);
+	colpm2_delay : wide_delay_line
+		generic map (COUNT=>1, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>colpm2_snap_reg,enable=>COLOUR_CLOCK_HIGHRES,reset_n=>reset_n,data_out=>colpm2_adj);
+	colpm3_delay : wide_delay_line
+		generic map (COUNT=>1, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>colpm3_snap_reg,enable=>COLOUR_CLOCK_HIGHRES,reset_n=>reset_n,data_out=>colpm3_adj);
+
+	colpf0_delay : wide_delay_line
+		generic map (COUNT=>1, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>colpf0_snap_reg,enable=>COLOUR_CLOCK_HIGHRES,reset_n=>reset_n,data_out=>colpf0_adj);
+	colpf1_delay : wide_delay_line
+		generic map (COUNT=>1, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>colpf1_snap_reg,enable=>COLOUR_CLOCK_HIGHRES,reset_n=>reset_n,data_out=>colpf1_adj);
+	colpf2_delay : wide_delay_line
+		generic map (COUNT=>1, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>colpf2_snap_reg,enable=>COLOUR_CLOCK_HIGHRES,reset_n=>reset_n,data_out=>colpf2_adj);
+	colpf3_delay : wide_delay_line
+		generic map (COUNT=>1, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>colpf3_snap_reg,enable=>COLOUR_CLOCK_HIGHRES,reset_n=>reset_n,data_out=>colpf3_adj);
+
+	hposp0_delay : wide_delay_line
+		generic map (COUNT=>3, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>hposp0_snap_reg(7 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>hposp0_delayed_reg(7 downto 0));		
+	hposp1_delay : wide_delay_line
+		generic map (COUNT=>3, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>hposp1_snap_reg(7 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>hposp1_delayed_reg(7 downto 0));		
+	hposp2_delay : wide_delay_line
+		generic map (COUNT=>3, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>hposp2_snap_reg(7 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>hposp2_delayed_reg(7 downto 0));		
+	hposp3_delay : wide_delay_line
+		generic map (COUNT=>3, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>hposp3_snap_reg(7 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>hposp3_delayed_reg(7 downto 0));				
+
+	hposm0_delay : wide_delay_line
+		generic map (COUNT=>3, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>hposm0_snap_reg(7 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>hposm0_delayed_reg(7 downto 0));		
+	hposm1_delay : wide_delay_line
+		generic map (COUNT=>3, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>hposm1_snap_reg(7 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>hposm1_delayed_reg(7 downto 0));		
+	hposm2_delay : wide_delay_line
+		generic map (COUNT=>3, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>hposm2_snap_reg(7 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>hposm2_delayed_reg(7 downto 0));		
+	hposm3_delay : wide_delay_line
+		generic map (COUNT=>3, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>hposm3_snap_reg(7 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>hposm3_delayed_reg(7 downto 0));				
+		
+	sizep0_delay : wide_delay_line
+		generic map (COUNT=>2, WIDTH=>2)
+		port map(clk=>clk,sync_reset=>'0',data_in=>sizep0_snap_reg(1 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>sizep0_delayed_reg(1 downto 0));		
+	sizep1_delay : wide_delay_line
+		generic map (COUNT=>2, WIDTH=>2)
+		port map(clk=>clk,sync_reset=>'0',data_in=>sizep1_snap_reg(1 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>sizep1_delayed_reg(1 downto 0));		
+	sizep2_delay : wide_delay_line
+		generic map (COUNT=>2, WIDTH=>2)
+		port map(clk=>clk,sync_reset=>'0',data_in=>sizep2_snap_reg(1 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>sizep2_delayed_reg(1 downto 0));		
+	sizep3_delay : wide_delay_line
+		generic map (COUNT=>2, WIDTH=>2)
+		port map(clk=>clk,sync_reset=>'0',data_in=>sizep3_snap_reg(1 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>sizep3_delayed_reg(1 downto 0));		
+	sizem_delay : wide_delay_line
+		generic map (COUNT=>2, WIDTH=>8)
+		port map(clk=>clk,sync_reset=>'0',data_in=>sizem_snap_reg(7 downto 0),enable=>COLOUR_CLOCK,reset_n=>reset_n,data_out=>sizem_delayed_reg(7 downto 0));				
+		
+	-- joystick
+	process(trig_reg, trig, gractl_reg)
+	begin	
+		trig_next <= trig;
+		
+		if (gractl_reg(2) = '1') then
+			trig_next <= trig_reg and trig;
+		end if;
+	end process;
+	
+	-- Read from registers		
+	process(addr_decoded, CONSOL_IN, consol_output_reg, trig_reg, m0pf_reg,m1pf_reg,m2pf_reg,m3pf_reg,m0pl_reg,m1pl_reg,m2pl_reg,m3pl_reg,p0pf_reg,p1pf_reg,p2pf_reg,p3pf_reg,p0pl_reg,p1pl_reg,p2pl_reg,p3pl_reg, pal)
+	begin
+		data_out <= X"0F";
+
+		if (addr_decoded(0) = '1') then
+			data_out <= "0000"&m0pf_reg;
+		end if;
+
+		if (addr_decoded(1) = '1') then
+			data_out <= "0000"&m1pf_reg;
+		end if;
+		
+		if (addr_decoded(2) = '1') then
+			data_out <= "0000"&m2pf_reg;
+		end if;
+
+		if (addr_decoded(3) = '1') then
+			data_out <= "0000"&m3pf_reg;
+		end if;
+
+		if (addr_decoded(4) = '1') then
+			data_out <= "0000"&p0pf_reg;
+		end if;
+
+		if (addr_decoded(5) = '1') then
+			data_out <= "0000"&p1pf_reg;
+		end if;
+		
+		if (addr_decoded(6) = '1') then
+			data_out <= "0000"&p2pf_reg;
+		end if;
+
+		if (addr_decoded(7) = '1') then
+			data_out <= "0000"&p3pf_reg;
+		end if;
+		
+		if (addr_decoded(8) = '1') then
+			data_out <= "0000"&m0pl_reg;
+		end if;
+
+		if (addr_decoded(9) = '1') then
+			data_out <= "0000"&m1pl_reg;
+		end if;
+		
+		if (addr_decoded(10) = '1') then
+			data_out <= "0000"&m2pl_reg;
+		end if;
+
+		if (addr_decoded(11) = '1') then
+			data_out <= "0000"&m3pl_reg;
+		end if;		
+
+		if (addr_decoded(12) = '1') then
+			data_out <= "0000"&p0pl_reg;
+		end if;
+
+		if (addr_decoded(13) = '1') then
+			data_out <= "0000"&p1pl_reg;
+		end if;
+		
+		if (addr_decoded(14) = '1') then
+			data_out <= "0000"&p2pl_reg;
+		end if;
+
+		if (addr_decoded(15) = '1') then
+			data_out <= "0000"&p3pl_reg;
+		end if;		
+		
+		if (addr_decoded(16) = '1') then
+			data_out <= "0000000"&trig_reg(0);
+		end if;
+
+		if (addr_decoded(17) = '1') then
+			data_out <= "0000000"&trig_reg(1);
+		end if;
+
+		if (addr_decoded(18) = '1') then
+			data_out <= "0000000"&trig_reg(2);
+		end if;
+		
+		if (addr_decoded(19) = '1') then
+			data_out <= "0000000"&trig_reg(3);
+		end if;
+		
+		if (addr_decoded(20) = '1') then
+			data_out <= "0000"&not(pal&pal&pal)&'1';
+		end if;
+
+		if (addr_decoded(31) = '1') then
+			data_out <= "0000"&(not(CONSOL_IN) and (not consol_output_reg));
+		end if;
+		
+	end process;
+
+	process (highres_reg, colour_clock, vsync_reg, vsync_next, interlace_switch_count_reg, field_reg, interlace_reg, interlace_pending_reg, ANTIC_DMA_ENABLED)
+	begin
+		interlace_next <= interlace_reg;
+		interlace_pending_next <= interlace_pending_reg;
+		field_next <= field_reg;
+		interlace_switch_count_next <= interlace_switch_count_reg;
+
+		-- vsync end
+		if (vsync_reg = '1') and (vsync_next = '0') and (ANTIC_DMA_ENABLED = '1') then
+			if (interlace_reg /= highres_reg) or (interlace_reg /= interlace_pending_reg) then
+				if (highres_reg xor interlace_pending_reg) = '1' then
+					interlace_switch_count_next <= 0;
+					interlace_pending_next <= highres_reg;
+				else
+					interlace_switch_count_next <= interlace_switch_count_reg + 1;
+				end if;
+			end if;
+		end if;
+
+		-- vsync start
+		if (vsync_reg = '0') and (vsync_next = '1') then
+			field_next <= not(field_reg);
+			if interlace_switch_count_reg = 8 then
+				interlace_next <= interlace_pending_reg;
+				if (interlace_pending_reg ='1') and (interlace_reg = '0') then
+					field_next <= '1';
+				end if;
+			end if;
+		end if;
+
+	end process;
+
+	-- output	
+	colour_out <= colour_reg;
+	
+	vsync<=vsync_half_reg when (interlace_enable = '1') and (interlace_reg = '1') else vsync_reg;
+	hsync<=hsync_reg;
+	csync<=csync_reg xor vsync_reg;
+	blank<=hblank_reg or vsync_reg;
+	burst<=burst_reg;
+	odd_line<=odd_scanline_reg;
+	
+	consol_out <= consol_output_reg;
+
+	GTIA_HIGHRES_OUT <= highres_adj;
+	GTIA_ACTIVE_HR_OUT <= active_hr_adj;
+	GTIA_PRIOR_RAW <= gtia_prior_adj;
+	GTIA_PRIOR <= gtia_prior_next;
+
+	GTIA_PF0_OUT <= colpf0_adj;
+	GTIA_PF1_OUT <= colpf1_adj;
+	GTIA_PF2_OUT <= colpf2_adj;
+	GTIA_PF3_OUT <= colpf3_adj;
+
+	PALETTE_out <= palette_reg;
+	GTIA_VSYNC <= vsync_reg and not(vsync_next);
+	GTIA_HPOS <= hpos_reg;
+	interlace <= interlace_enable and interlace_reg;
+	interlace_field <= interlace_enable and field_reg;
+
+	GTIA_PF0 <= GTIA_PF0_IN when colour_clock_vbxe='1' else colpf0_adj;
+	GTIA_PF1 <= GTIA_PF1_IN when colour_clock_vbxe='1' else colpf1_adj;
+	GTIA_PF2 <= GTIA_PF2_IN when colour_clock_vbxe='1' else colpf2_adj;
+	GTIA_HIGHRES <= GTIA_HIGHRES_IN when colour_clock_vbxe='1' else highres_adj;
+	GTIA_ACTIVE_HR <= GTIA_ACTIVE_HR_IN when colour_clock_vbxe='1' else active_hr_adj;
+	GTIA_PRIOR_VBXE <= GTIA_PRIOR_IN when colour_clock_vbxe='1' else gtia_prior_adj;
+
+	-- special for MISTER
+	hblank<=hblank_reg;
+	vblank<=vsync_reg;
+
+end vhdl;

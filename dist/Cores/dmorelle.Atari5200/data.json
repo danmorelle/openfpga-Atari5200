@@ -1,0 +1,25 @@
+{
+  "data": {
+    "magic": "APF_VER_1",
+    "data_slots": [
+      {
+        "name": "Cartridge",
+        "id": 0,
+        "required": true,
+        "parameters": "0x109",
+        "extensions": ["a52", "bin", "car", "rom"],
+        "size_maximum": "0x20010",
+        "address": "0x10000000"
+      },
+      {
+        "name": "BIOS",
+        "id": 1,
+        "required": true,
+        "parameters": "0x8",
+        "filename": "5200.rom",
+        "size_exact": "0x800",
+        "address": "0x20000000"
+      }
+    ]
+  }
+}

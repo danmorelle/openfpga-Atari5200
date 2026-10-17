@@ -1,0 +1,20 @@
+{
+  "input": {
+    "magic": "APF_VER_1",
+    "controllers": [
+      {
+        "type": "default",
+        "mappings": [
+          { "id": 0, "name": "Fire 1 (top)", "key": "pad_btn_a" },
+          { "id": 1, "name": "Fire 2 (bottom)", "key": "pad_btn_b" },
+          { "id": 2, "name": "Keypad 1", "key": "pad_btn_x" },
+          { "id": 3, "name": "Keypad 2", "key": "pad_btn_y" },
+          { "id": 4, "name": "Keypad *", "key": "pad_trig_l" },
+          { "id": 5, "name": "Keypad #", "key": "pad_trig_r" },
+          { "id": 6, "name": "Start", "key": "pad_btn_start" },
+          { "id": 7, "name": "Pause / Shift", "key": "pad_btn_select" }
+        ]
+      }
+    ]
+  }
+}

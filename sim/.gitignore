@@ -1,0 +1,6 @@
+roms/
+out/
+work/
+obj_dir/
+*_synth.v
+synth.log

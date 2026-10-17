@@ -1,0 +1,14 @@
+read_verilog -sv yosys_pll_stub.v
+read_verilog -sv ../src/fpga/apf/common.v
+read_verilog -sv ../src/fpga/core/core_bridge_cmd.v
+read_verilog -sv -D ATARI_HS_ACTIVE_HIGH=1 ../src/fpga/core/core_top.v
+read_verilog -sv ../src/fpga/core/pocket/cart_loader.v ../src/fpga/core/pocket/cart_mem.v ../src/fpga/core/pocket/boot_seq.v ../src/fpga/core/pocket/input_map.v ../src/fpga/core/pocket/video_apf.v ../src/fpga/core/pocket/audio_apf.v
+read_verilog atari5200_pocket_synth.v
+synth -top core_top -run :fine
+memory -nomap
+opt -fast
+techmap
+opt -fast
+abc -lut 6
+opt_clean
+stat
