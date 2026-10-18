@@ -5,10 +5,10 @@
       "platform_ids": ["5200"],
       "shortname": "Atari5200",
       "description": "Atari 5200 SuperSystem. Port of the MiSTer Atari 5200 core.",
-      "author": "dmorelle",
-      "url": "https://github.com/dmorelle/openfpga-Atari5200",
+      "author": "danmorelle",
+      "url": "https://github.com/danmorelle/openfpga-Atari5200",
       "version": "0.1.0",
-      "date_release": "2026-10-17"
+      "date_release": "2026-10-18"
     },
     "framework": {
       "target_product": "Analogue Pocket",
