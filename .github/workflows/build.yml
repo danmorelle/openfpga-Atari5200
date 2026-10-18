@@ -1,11 +1,22 @@
-# Builds the Atari 5200 core with Quartus (in Docker) and uploads an
-# SD card ready zip as a workflow artifact.
+# Builds the Atari 5200 core with Quartus (in Docker).
+#
+# Every push to main uploads an SD card ready zip as a workflow artifact.
+# Pushing a version tag (e.g. v0.1.0) also publishes a GitHub release with
+# the zip attached; core updaters such as pupdate pick up new releases from
+# there through the openFPGA cores inventory.
+#
+# To release: bump "version" in dist/Cores/danmorelle.Atari5200/core.json,
+# commit, then tag the commit v<version> and push the tag.
 name: Build
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -13,6 +24,15 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v4
+
+      - name: Check the tag matches core.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(python3 -c "import json;print(json.load(open('dist/Cores/danmorelle.Atari5200/core.json'))['core']['metadata']['version'])")
+          if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match core.json version $version"
+            exit 1
+          fi
 
       - name: Free disk space for the Quartus image
         run: |
@@ -46,3 +66,17 @@ jobs:
           name: Atari5200-Pocket-build-${{ github.run_number }}
           path: release/sd/
           include-hidden-files: true
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          zip="danmorelle.Atari5200_${version}.zip"
+          # Zip the SD card layout so Cores/, Platforms/ and Assets/ sit at the top
+          (cd release/sd && zip -r -X "../../${zip}" .)
+          unzip -l "${zip}"
+          gh release create "${GITHUB_REF_NAME}" "${zip}" \
+            --title "Atari 5200 ${version}" \
+            --notes-file RELEASE_NOTES.md

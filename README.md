@@ -4,13 +4,15 @@ An openFPGA core for the Analogue Pocket that recreates the Atari 5200
 SuperSystem. It is a port of the [MiSTer Atari 5200 core](https://github.com/MiSTer-devel/Atari800_MiSTer),
 which is based on Mark Watson's Atari 800XL FPGA core.
 
-**Status: early test build (0.1.0).** It works in simulation; it has not been
-tested on real hardware yet.
+**Status: 0.1.0, first release.** Tested on a real Pocket (Pac-Man runs with
+correct picture, sound and controls).
 
 ## Installing
 
-1. Download the latest build (the `Atari5200-Pocket-build-…` zip from the
-   Actions tab) and copy its contents to the root of your Pocket's SD card.
+1. Download `danmorelle.Atari5200_<version>.zip` from the
+   [latest release](https://github.com/danmorelle/openfpga-Atari5200/releases/latest)
+   and unzip it onto the root of your Pocket's SD card. Core updaters such as
+   pupdate can also install and update it.
 2. Put the Atari 5200 BIOS in `Assets/5200/common/5200.rom`. It must be the
    2048 byte BIOS. It is not included.
 3. Put your cartridge images in `Assets/5200/common/` (or any subfolder).
@@ -80,7 +82,10 @@ processor, so this port does all of that in the FPGA:
 ## Building
 
 The GitHub Actions workflow builds the core with Quartus Prime Lite 21.1 in
-Docker and uploads an SD card ready zip. To build locally, open
+Docker and uploads an SD card ready zip. To publish a release, bump `version`
+in `dist/Cores/danmorelle.Atari5200/core.json`, commit, then tag the commit
+`v<version>` and push the tag; the workflow attaches the zip to a GitHub
+release. To build locally, open
 `src/fpga/ap_core.qpf` in Quartus Prime Lite, compile, then run
 `python3 tools/package.py` to create `release/sd/`.
 
