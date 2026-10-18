@@ -45,3 +45,4 @@ jobs:
         with:
           name: Atari5200-Pocket-build-${{ github.run_number }}
           path: release/sd/
+          include-hidden-files: true
