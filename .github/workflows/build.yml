@@ -1,18 +1,19 @@
 # Builds the Atari 5200 core with Quartus (in Docker).
 #
 # Every push to main uploads an SD card ready zip as a workflow artifact.
-# Pushing a version tag (e.g. v0.1.0) also publishes a GitHub release with
-# the zip attached; core updaters such as pupdate pick up new releases from
-# there through the openFPGA cores inventory.
+# Publishing a GitHub release (tag v<version>) builds the core and attaches
+# the zip to that release; core updaters such as pupdate pick up new
+# releases from there through the openFPGA cores inventory.
 #
 # To release: bump "version" in dist/Cores/danmorelle.Atari5200/core.json,
-# commit, then tag the commit v<version> and push the tag.
+# commit, then publish a release tagged v<version> on GitHub.
 name: Build
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -25,12 +26,14 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Check the tag matches core.json
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Check the release tag matches core.json
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           version=$(python3 -c "import json;print(json.load(open('dist/Cores/danmorelle.Atari5200/core.json'))['core']['metadata']['version'])")
-          if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match core.json version $version"
+          if [ "v$version" != "$TAG" ]; then
+            echo "Release tag $TAG does not match core.json version $version"
             exit 1
           fi
 
@@ -67,16 +70,15 @@ jobs:
           path: release/sd/
           include-hidden-files: true
 
-      - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Attach the zip to the release
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           zip="danmorelle.Atari5200_${version}.zip"
           # Zip the SD card layout so Cores/, Platforms/ and Assets/ sit at the top
           (cd release/sd && zip -r -X "../../${zip}" .)
           unzip -l "${zip}"
-          gh release create "${GITHUB_REF_NAME}" "${zip}" \
-            --title "Atari 5200 ${version}" \
-            --notes-file RELEASE_NOTES.md
+          gh release upload "$TAG" "${zip}" --clobber

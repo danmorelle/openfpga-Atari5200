@@ -83,9 +83,9 @@ processor, so this port does all of that in the FPGA:
 
 The GitHub Actions workflow builds the core with Quartus Prime Lite 21.1 in
 Docker and uploads an SD card ready zip. To publish a release, bump `version`
-in `dist/Cores/danmorelle.Atari5200/core.json`, commit, then tag the commit
-`v<version>` and push the tag; the workflow attaches the zip to a GitHub
-release. To build locally, open
+in `dist/Cores/danmorelle.Atari5200/core.json`, commit, then publish a GitHub
+release tagged `v<version>`; the workflow builds the core and attaches the
+zip to the release. To build locally, open
 `src/fpga/ap_core.qpf` in Quartus Prime Lite, compile, then run
 `python3 tools/package.py` to create `release/sd/`.
 
