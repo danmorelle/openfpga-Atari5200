@@ -13,8 +13,10 @@ correct picture, sound and controls).
    [latest release](https://github.com/danmorelle/openfpga-Atari5200/releases/latest)
    and unzip it onto the root of your Pocket's SD card. Core updaters such as
    pupdate can also install and update it.
-2. Put the Atari 5200 BIOS in `Assets/5200/common/5200.rom`. It must be the
-   2048 byte BIOS. It is not included.
+2. The core needs the 2048 byte Atari 5200 BIOS in
+   `Assets/5200/common/5200.rom`. It is not included. If you install with
+   pupdate (with its BIOS and asset downloads on, the default), it fetches the
+   BIOS for you; otherwise put it there yourself.
 3. Put your cartridge images in `Assets/5200/common/` (or any subfolder).
    Supported: `.a52`, `.bin`, `.rom` and `.car`.
 
